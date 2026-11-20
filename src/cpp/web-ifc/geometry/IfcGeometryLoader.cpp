@@ -3121,7 +3121,10 @@ namespace webifc::geometry
         }
 
         double numCurvePoints = ctrolPts.size();
-        std::vector<glm::dvec3> tempPoints = GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
+        const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
+        std::vector<glm::dvec3> tempPoints = betweenVertices
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);
       }
@@ -3212,7 +3215,10 @@ namespace webifc::geometry
           ctrolPts.push_back(GetCartesianPoint3D(pointId));
         }
         double numCurvePoints = ctrolPts.size();
-        std::vector<glm::dvec3> tempPoints = GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
+        const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
+        std::vector<glm::dvec3> tempPoints = betweenVertices
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);
       }
@@ -3300,7 +3306,10 @@ namespace webifc::geometry
         }
 
         double numCurvePoints = ctrolPts.size();
-        std::vector<glm::dvec3> tempPoints = GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
+        const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
+        std::vector<glm::dvec3> tempPoints = betweenVertices
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);
       }

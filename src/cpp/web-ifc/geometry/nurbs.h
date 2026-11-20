@@ -35,6 +35,11 @@ namespace webifc::geometry{
 		private:
 
 		void init();
+		void fill_geometry_legacy();
+		// The trimmed face meshed in the surface's parameter plane; false when it could not be
+		bool fill_geometry_trimmed();
+		// The parameters of the surface point nearest pt, searched from uv; returns the distance left
+		double project(glm::dvec3 const& pt, uv_point_t& uv) const;
 		std::vector<double> get_weights() const;
 		std::vector<double> get_knots(std::vector<double>const & bs_knots, std::vector<uint32_t> const & bs_mults) const;
 		std::vector<glm::dvec3> get_control_points() const;

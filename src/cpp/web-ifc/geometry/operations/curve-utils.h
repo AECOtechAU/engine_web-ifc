@@ -300,6 +300,37 @@ inline IfcCurve Build3DArc3Pt(const glm::dvec3 &p1, const glm::dvec3 &p2, const 
 		return c;
 	}
 
+	// The part of a B-spline curve between the curve points nearest two positions: an edge between its vertices.
+	// The ends are the positions themselves, so neighbouring edges and faces meet exactly.
+	inline	std::vector<glm::dvec3> GetTrimmedRationalBSplineCurveWithKnots(int degree, const std::vector<glm::dvec3> &points, const std::vector<double> &knots, const std::vector<double> &weights, const glm::dvec3 &from, const glm::dvec3 &to)
+	{
+		const auto at = [&](double t) { return InterpolateRationalBSplineCurveWithKnots(glm::clamp(t, 0.0, 1.0), degree, points, knots, weights); };
+		const int coarse = std::max<int>(32, static_cast<int>(points.size()) * 8);
+		std::vector<glm::dvec3> samples(coarse + 1);
+		for (int i = 0; i <= coarse; i++) samples[i] = at(static_cast<double>(i) / coarse);
+		const auto nearest = [&](const glm::dvec3 &p)
+		{
+			int best = 0; double bestD = std::numeric_limits<double>::max();
+			for (int i = 0; i <= coarse; i++) { const double d = glm::distance(samples[i], p); if (d < bestD) { bestD = d; best = i; } }
+			double lo = static_cast<double>(std::max(0, best - 1)) / coarse, hi = static_cast<double>(std::min(coarse, best + 1)) / coarse;
+			for (int it = 0; it < 48; it++)
+			{
+				const double a = lo + (hi - lo) / 3, b = hi - (hi - lo) / 3;
+				if (glm::distance(at(a), p) < glm::distance(at(b), p)) hi = b; else lo = a;
+			}
+			return (lo + hi) / 2;
+		};
+		double t0 = nearest(from), t1 = nearest(to);
+		// one vertex at both ends: the whole of a closed curve
+		if (std::abs(t1 - t0) < 1e-9) { t0 = 0; t1 = 1; }
+		const int steps = glm::clamp(static_cast<int>(std::ceil(points.size() * 2 * std::abs(t1 - t0))), 1, 256);
+		std::vector<glm::dvec3> c(steps + 1);
+		for (int i = 1; i < steps; i++) c[i] = at(t0 + (t1 - t0) * i / steps);
+		c.front() = from;
+		c.back() = to;
+		return c;
+	}
+
 	inline	std::vector<glm::dvec2> GetRationalBSplineCurveWithKnots(int degree, std::vector<glm::dvec2> points, std::vector<double> knots, std::vector<double> weights)
 	{
 		spdlog::debug("[GetRationalBSplineCurveWithKnots({})]");

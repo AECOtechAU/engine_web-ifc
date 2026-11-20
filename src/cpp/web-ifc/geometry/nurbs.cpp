@@ -10,10 +10,213 @@
 
 namespace webifc::geometry{
 
+	// How far apart two neighbouring directions of the surface may be before another row of points goes in
+	constexpr double TRIM_TURN_STEP { 0.35 };
+	constexpr int TRIM_MAX_STEPS { 48 };
+	constexpr int TRIM_SEED_GRID { 12 };
+
 	void Nurbs::fill_geometry(){
 		if (!_initialized) {
 			return;
 		}
+		if (this->fill_geometry_trimmed()) return;
+		this->fill_geometry_legacy();
+	}
+
+	double Nurbs::project(glm::dvec3 const& pt, uv_point_t& uv) const
+	{
+		double best = std::numeric_limits<double>::max();
+		uv_point_t at = uv, bestUV = uv;
+		for (int it = 0; it < 24; it++)
+		{
+			const auto d = tinynurbs::surfaceDerivatives(*this->nurbs, 1, at.x, at.y);
+			const glm::dvec3 r = d(0, 0) - pt, su = d(1, 0), sv = d(0, 1);
+			const double dist = glm::length(r);
+			if (dist < best) { best = dist; bestUV = at; }
+			const double a = glm::dot(su, su), b = glm::dot(su, sv), c = glm::dot(sv, sv), e = -glm::dot(r, su), f = -glm::dot(r, sv);
+			double du = 0, dv = 0;
+			const double det = a * c - b * b;
+			if (std::abs(det) > 1e-14 * std::max(1e-300, a * c)) { du = (e * c - b * f) / det; dv = (a * f - b * e) / det; }
+			else if (a > c && a > 0) du = e / a; // one direction has collapsed (a pole): move along the other
+			else if (c > 0) dv = f / c;
+			const uv_point_t next { glm::clamp(at.x + du, range_knots_u.x, range_knots_u.y), glm::clamp(at.y + dv, range_knots_v.x, range_knots_v.y) };
+			const double moved = std::abs(next.x - at.x) / (range_knots_u.y - range_knots_u.x) + std::abs(next.y - at.y) / (range_knots_v.y - range_knots_v.x);
+			at = next;
+			if (moved < 1e-12) break;
+		}
+		const double last = glm::distance(tinynurbs::surfacePoint(*this->nurbs, at.x, at.y), pt);
+		if (last < best) { best = last; bestUV = at; }
+		uv = bestUV;
+		return best;
+	}
+
+	bool Nurbs::fill_geometry_trimmed()
+	{
+		try
+		{
+			const double u0 = range_knots_u.x, u1 = range_knots_u.y, v0 = range_knots_v.x, v1 = range_knots_v.y;
+			if (!(u1 > u0) || !(v1 > v0)) return false;
+			const double close = 1e-4 / this->scaling; // a tenth of a millimetre
+			const double lost = 5e-3 / this->scaling;
+
+			// A coarse picture of the surface: where to start each search, and how much it turns
+			const int G = TRIM_SEED_GRID;
+			std::vector<glm::dvec3> grid((G + 1) * (G + 1));
+			for (int i = 0; i <= G; i++)
+				for (int j = 0; j <= G; j++)
+					grid[i * (G + 1) + j] = tinynurbs::surfacePoint(*this->nurbs, u0 + (u1 - u0) * i / G, v0 + (v1 - v0) * j / G);
+			const auto seed = [&](glm::dvec3 const& pt, double& interior)
+			{
+				double best = std::numeric_limits<double>::max(); int bi = 0, bj = 0;
+				for (int i = 0; i <= G; i++)
+					for (int j = 0; j <= G; j++)
+					{
+						const glm::dvec3 d = grid[i * (G + 1) + j] - pt; const double dd = glm::dot(d, d);
+						if (dd < best) { best = dd; bi = i; bj = j; }
+					}
+				interior = std::min(std::min(bi, G - bi), std::min(bj, G - bj));
+				return uv_point_t { u0 + (u1 - u0) * bi / G, v0 + (v1 - v0) * bj / G };
+			};
+
+			std::vector<CDT::V2d<double>> vertices;
+			std::vector<glm::dvec3> positions;
+			std::vector<CDT::Edge> edges;
+			double minU = u1, maxU = u0, minV = v1, maxV = v0;
+			for (auto const& bound : this->bounds)
+			{
+				auto const& pts = bound.curve.points;
+				size_t n = pts.size();
+				while (n > 1 && glm::distance(pts[n - 1], pts[0]) < close * 1e-3) n--;
+				if (n < 3) { if (&bound == &this->bounds.front()) return false; continue; }
+				// Start where the surface point is least in doubt (away from a seam), then follow the loop
+				size_t start = 0; double mostInterior = -1;
+				std::vector<uv_point_t> seeds(n);
+				for (size_t i = 0; i < n; i++)
+				{
+					double interior = 0; seeds[i] = seed(pts[i], interior);
+					if (interior > mostInterior) { mostInterior = interior; start = i; }
+				}
+				std::vector<uv_point_t> uvs(n);
+				uv_point_t previous = seeds[start];
+				for (size_t k = 0; k < n; k++)
+				{
+					const size_t i = (start + k) % n;
+					uv_point_t uv = previous;
+					double left = this->project(pts[i], uv);
+					if (left > close)
+					{
+						uv_point_t other = seeds[i];
+						const double otherLeft = this->project(pts[i], other);
+						if (otherLeft < left) { left = otherLeft; uv = other; }
+					}
+					if (left > lost) return false;
+					uvs[i] = uv; previous = uv;
+				}
+				const auto first = static_cast<CDT::VertInd>(vertices.size());
+				for (size_t i = 0; i < n; i++)
+				{
+					vertices.push_back(CDT::V2d<double>{ uvs[i].x, uvs[i].y });
+					positions.push_back(pts[i]);
+					edges.emplace_back(first + static_cast<CDT::VertInd>(i), first + static_cast<CDT::VertInd>((i + 1) % n));
+					minU = std::min(minU, uvs[i].x); maxU = std::max(maxU, uvs[i].x); minV = std::min(minV, uvs[i].y); maxV = std::max(maxV, uvs[i].y);
+				}
+			}
+			if (vertices.size() < 3 || !(maxU > minU) || !(maxV > minV)) return false;
+			const size_t boundCount = vertices.size();
+
+			// Rows of points inside the face: as many as the surface turns across it
+			const auto turning = [&](bool alongU)
+			{
+				double most = 0;
+				for (int line = 0; line <= G; line++)
+				{
+					double sum = 0; glm::dvec3 before(0); bool has = false;
+					for (int k = 0; k < G; k++)
+					{
+						const double lo = alongU ? u0 + (u1 - u0) * k / G : v0 + (v1 - v0) * k / G, hi = alongU ? u0 + (u1 - u0) * (k + 1) / G : v0 + (v1 - v0) * (k + 1) / G;
+						if (hi < (alongU ? minU : minV) || lo > (alongU ? maxU : maxV)) continue;
+						const glm::dvec3 step = alongU ? grid[(k + 1) * (G + 1) + line] - grid[k * (G + 1) + line] : grid[line * (G + 1) + k + 1] - grid[line * (G + 1) + k];
+						const double len = glm::length(step); if (len < 1e-12) continue;
+						const glm::dvec3 dir = step / len;
+						if (has) sum += std::acos(glm::clamp(glm::dot(dir, before), -1.0, 1.0));
+						before = dir; has = true;
+					}
+					most = std::max(most, sum);
+				}
+				// the coarse picture sees a turn only between its own steps: allow for one more
+				const double span = alongU ? (maxU - minU) / (u1 - u0) : (maxV - minV) / (v1 - v0);
+				return most * std::min(1.0, span * G / std::max(1.0, span * G - 1.0) );
+			};
+			const int stepsU = glm::clamp(static_cast<int>(std::ceil(turning(true) / TRIM_TURN_STEP)), 1, TRIM_MAX_STEPS);
+			const int stepsV = glm::clamp(static_cast<int>(std::ceil(turning(false) / TRIM_TURN_STEP)), 1, TRIM_MAX_STEPS);
+			const double stepU = (maxU - minU) / stepsU, stepV = (maxV - minV) / stepsV;
+			for (int i = 1; i < stepsU; i++)
+				for (int j = 1; j < stepsV; j++)
+				{
+					const double u = minU + stepU * i, v = minV + stepV * j;
+					// not on top of the boundary: that only makes slivers
+					bool clear = true;
+					for (size_t e = 0; e < edges.size() && clear; e++)
+					{
+						const auto& a = vertices[edges[e].v1()]; const auto& b = vertices[edges[e].v2()];
+						const double ax = (a.x - u) / stepU, ay = (a.y - v) / stepV, bx = (b.x - u) / stepU, by = (b.y - v) / stepV;
+						const double dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+						const double t = len2 > 0 ? glm::clamp(-(ax * dx + ay * dy) / len2, 0.0, 1.0) : 0.0;
+						const double px = ax + dx * t, py = ay + dy * t;
+						if (px * px + py * py < 0.09) clear = false;
+					}
+					if (!clear) continue;
+					vertices.push_back(CDT::V2d<double>{ u, v });
+					positions.push_back(tinynurbs::surfacePoint(*this->nurbs, u, v));
+				}
+
+			// Bound points that land on one another in the parameter plane (a pole, a seam met twice) are one vertex
+			const auto duplicates = CDT::RemoveDuplicatesAndRemapEdges(vertices, edges);
+			if (!duplicates.duplicates.empty())
+			{
+				std::vector<glm::dvec3> kept(vertices.size());
+				for (size_t i = 0; i < positions.size(); i++) kept[duplicates.mapping[i]] = positions[i];
+				// the first of each group wins, as the remap keeps it
+				for (size_t i = positions.size(); i-- > 0;) kept[duplicates.mapping[i]] = positions[i];
+				positions = std::move(kept);
+			}
+			edges.erase(std::remove_if(edges.begin(), edges.end(), [](CDT::Edge const& e) { return e.v1() == e.v2(); }), edges.end());
+			std::sort(edges.begin(), edges.end(), [](CDT::Edge const& a, CDT::Edge const& b) { return a.v1() != b.v1() ? a.v1() < b.v1() : a.v2() < b.v2(); });
+			// an edge walked twice (a seam) bounds nothing
+			std::vector<CDT::Edge> once;
+			for (size_t i = 0; i < edges.size();)
+			{
+				size_t j = i; while (j < edges.size() && edges[j] == edges[i]) j++;
+				if ((j - i) % 2 == 1) once.push_back(edges[i]);
+				i = j;
+			}
+			if (once.size() < 3) return false;
+
+			CDT::Triangulation<double> triangulator{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
+			triangulator.insertVertices(vertices);
+			triangulator.insertEdges(once);
+			triangulator.eraseOuterTrianglesAndHoles();
+			if (triangulator.triangles.empty()) return false;
+			(void)boundCount;
+			for (auto const& triangle : triangulator.triangles)
+			{
+				const auto i0 = triangle.vertices[0], i1 = triangle.vertices[1], i2 = triangle.vertices[2];
+				const auto& a = vertices[i0]; const auto& b = vertices[i1]; const auto& c = vertices[i2];
+				glm::dvec3 p0 = positions[i0], p1 = positions[i1], p2 = positions[i2];
+				if (glm::length(glm::cross(p1 - p0, p2 - p0)) < 1e-18) continue;
+				// Positive UV winding follows dS/du x dS/dv, regardless of bound order.
+				if ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0) std::swap(p1, p2);
+				geometry.AddFace(p0, p1, p2);
+			}
+			return true;
+		}
+		catch (...)
+		{
+			return false;
+		}
+	}
+
+	void Nurbs::fill_geometry_legacy(){
 		auto uv_points {this->get_uv_points()};
 		auto indices {get_triangulation_uv_points(uv_points)};
 
@@ -197,10 +400,13 @@ namespace webifc::geometry{
 	std::vector<double> Nurbs::get_weights() const{
 		std::vector<double> result(this->num_u * this->num_v);
 		std::fill(result.begin(), result.end(), 1.0);
-		for (auto const& row : this->bspline_surface.Weights)
-			for (size_t i{0}; i < row.size(); ++i)
-			{
-				result[i] = row[i];
+		// The loader fills WeightPoints, one row per row of control points
+		auto const& rows = this->bspline_surface.WeightPoints;
+		if (rows.size() != this->num_u) return result;
+		for (size_t r{0}; r < rows.size(); ++r)
+		{
+			if (rows[r].size() != this->num_v) { std::fill(result.begin(), result.end(), 1.0); return result; }
+			for (size_t i{0}; i < this->num_v; ++i) if (rows[r][i] > 0) result[r * this->num_v + i] = rows[r][i];
 		}
 		return result;
 	}
