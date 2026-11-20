@@ -9,6 +9,9 @@
 #include <array>
 #include <unordered_map>
 #include <optional>
+#include <memory>
+#include <limits>
+#include <cmath>
 #include <cstdint>
 #include <tinynurbs/tinynurbs.h>
 #include <spdlog/spdlog.h>
@@ -467,6 +470,176 @@ namespace webifc::geometry
             }
 		}
     }
+
+	// A run of points taken as a curve whose parameter counts the points: 0 at the first, 1 at the second
+	struct TrimPolyline
+	{
+		std::vector<glm::dvec2> flat;
+		// The parameter of the curve point nearest a position in the plane, and how far off it is
+		double nearest(glm::dvec2 const& q, double& distance) const
+		{
+			double best = std::numeric_limits<double>::max(), at = 0;
+			for (size_t i = 0; i + 1 < flat.size(); i++)
+			{
+				const glm::dvec2 ab = flat[i + 1] - flat[i];
+				const double len2 = glm::dot(ab, ab);
+				const double t = len2 > 0 ? glm::clamp(glm::dot(q - flat[i], ab) / len2, 0.0, 1.0) : 0.0;
+				const double d = glm::distance(q, flat[i] + ab * t);
+				if (d < best) { best = d; at = static_cast<double>(i) + t; }
+			}
+			distance = best;
+			return at;
+		}
+		template <typename T> static T at(std::vector<T> const& values, double t)
+		{
+			const double last = static_cast<double>(values.size() - 1);
+			t = glm::clamp(t, 0.0, last);
+			const size_t i = std::min(static_cast<size_t>(t), values.size() - 2);
+			const double f = t - static_cast<double>(i);
+			return values[i] * (1.0 - f) + values[i + 1] * f;
+		}
+	};
+
+	// S(u, v) = centre + radius * (cos u * X + sin u * Y) + v * Z
+	inline bool TriangulateTrimmedCylinder(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	{
+		const glm::dvec3 centre = surface.transformation[3];
+		const glm::dvec3 X = glm::normalize(glm::dvec3(surface.transformation[0])), Y = glm::normalize(glm::dvec3(surface.transformation[1])), Z = glm::normalize(glm::dvec3(surface.transformation[2]));
+		const double radius = surface.CylinderSurface.Radius;
+		if (!(radius > 0)) return false;
+		double low = std::numeric_limits<double>::max(), high = std::numeric_limits<double>::lowest();
+		for (auto const& bound : bounds)
+			for (auto const& pt : bound.curve.points) { const double h = glm::dot(pt - centre, Z); low = std::min(low, h); high = std::max(high, h); }
+		if (!(high > low)) return false;
+		TrimSurface s;
+		s.u0 = 0; s.u1 = 2 * CONST_PI; s.v0 = low; s.v1 = high; s.wrapU = true;
+		s.point = [=](double u, double v) { return centre + radius * (std::cos(u) * X + std::sin(u) * Y) + v * Z; };
+		s.project = [=](glm::dvec3 const& pt, glm::dvec2& uv)
+		{
+			const glm::dvec3 d = pt - centre;
+			const double x = glm::dot(d, X), y = glm::dot(d, Y), r = std::hypot(x, y);
+			double angle = r > radius * 1e-9 ? std::atan2(y, x) : uv.x;
+			angle += std::round((uv.x - angle) / (2 * CONST_PI)) * (2 * CONST_PI);
+			uv = { angle, glm::clamp(glm::dot(d, Z), low, high) };
+			return std::abs(r - radius);
+		};
+		s.direct = true;
+		s.even = true;
+		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
+	}
+
+	// S(u, v) = the profile point at v turned by u about the axis
+	inline bool TriangulateTrimmedRevolution(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	{
+		auto const& given = surface.RevolutionSurface.Profile.curve.points;
+		if (given.size() < 2 || surface.RevolutionSurface.Profile.isComposite) return false;
+		// The profile and the axis are given in the frame of the surface's position
+		const glm::dmat4 axis = surface.transformation * surface.RevolutionSurface.Direction;
+		const glm::dvec3 origin = axis[3];
+		const glm::dvec3 Z = glm::normalize(glm::dvec3(axis[2]));
+		std::vector<glm::dvec3> profile(given.size());
+		for (size_t i = 0; i < given.size(); i++) profile[i] = glm::dvec3(surface.transformation * glm::dvec4(given[i], 1.0));
+		// each profile point by its distance from the axis, its height along it and its angle about it
+		glm::dvec3 X(0); double widest = 0;
+		for (auto const& pt : profile)
+		{
+			const glm::dvec3 d = pt - origin, across = d - Z * glm::dot(d, Z);
+			if (glm::length(across) > widest) { widest = glm::length(across); X = across / widest; }
+		}
+		if (!(widest > 0)) return false;
+		const glm::dvec3 Y = glm::cross(Z, X);
+		auto line = std::make_shared<TrimPolyline>();
+		auto angles = std::make_shared<std::vector<double>>();
+		for (auto const& pt : profile)
+		{
+			const glm::dvec3 d = pt - origin;
+			const double x = glm::dot(d, X), y = glm::dot(d, Y), r = std::hypot(x, y);
+			line->flat.emplace_back(r, glm::dot(d, Z));
+			angles->push_back(r > widest * 1e-9 ? std::atan2(y, x) : 0.0);
+		}
+		// a profile point on the axis has no angle of its own: it takes its neighbour's
+		for (size_t i = 0; i < profile.size(); i++)
+			if (line->flat[i].x <= widest * 1e-9) (*angles)[i] = (*angles)[i > 0 ? i - 1 : 1];
+		const double last = static_cast<double>(profile.size() - 1);
+		TrimSurface s;
+		s.u0 = 0; s.u1 = 2 * CONST_PI; s.v0 = 0; s.v1 = last; s.wrapU = true;
+		const bool closed = glm::distance(profile.front(), profile.back()) < widest * 1e-9;
+		s.wrapV = closed;
+		s.point = [=](double u, double v)
+		{
+			const glm::dvec2 rh = TrimPolyline::at(line->flat, v);
+			const double angle = u + TrimPolyline::at(*angles, v);
+			return origin + rh.x * (std::cos(angle) * X + std::sin(angle) * Y) + rh.y * Z;
+		};
+		s.project = [=](glm::dvec3 const& pt, glm::dvec2& uv)
+		{
+			const glm::dvec3 d = pt - origin;
+			const double x = glm::dot(d, X), y = glm::dot(d, Y), r = std::hypot(x, y);
+			double left = 0;
+			double v = line->nearest({ r, glm::dot(d, Z) }, left);
+			double angle = r > widest * 1e-9 ? std::atan2(y, x) - TrimPolyline::at(*angles, v) : uv.x;
+			angle += std::round((uv.x - angle) / (2 * CONST_PI)) * (2 * CONST_PI);
+			if (closed) v += std::round((uv.y - v) / last) * last;
+			uv = { angle, v };
+			return left;
+		};
+		s.direct = true;
+		s.creased = 1;
+		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
+	}
+
+	// S(u, v) = the profile point at u, moved v along the direction
+	inline bool TriangulateTrimmedExtrusion(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	{
+		auto const& extrusion = surface.ExtrusionSurface;
+		if (extrusion.Profile.isComposite || glm::length(extrusion.Direction) == 0) return false;
+		auto const& given = extrusion.SweptCurve.points.size() >= 2 ? extrusion.SweptCurve.points : extrusion.Profile.curve.points;
+		if (given.size() < 2) return false;
+		const glm::dmat4 placement = surface.transformation, back = glm::inverse(placement);
+		const glm::dvec3 d = glm::normalize(extrusion.Direction);
+		// across the direction the surface is its profile: two axes of that plane
+		glm::dvec3 X = glm::cross(d, std::abs(d.x) < 0.9 ? glm::dvec3(1, 0, 0) : glm::dvec3(0, 1, 0));
+		X = glm::normalize(X);
+		const glm::dvec3 Y = glm::cross(d, X);
+		auto profile = std::make_shared<std::vector<glm::dvec3>>(given.begin(), given.end());
+		auto line = std::make_shared<TrimPolyline>();
+		for (auto const& pt : *profile) line->flat.emplace_back(glm::dot(pt, X), glm::dot(pt, Y));
+		const double last = static_cast<double>(profile->size() - 1);
+		const auto local = [=](glm::dvec3 const& pt, double& u, double& v)
+		{
+			const glm::dvec3 q = glm::dvec3(back * glm::dvec4(pt, 1.0));
+			double left = 0;
+			u = line->nearest({ glm::dot(q, X), glm::dot(q, Y) }, left);
+			v = glm::dot(q - TrimPolyline::at(*profile, u), d);
+			return left;
+		};
+		double low = std::numeric_limits<double>::max(), high = std::numeric_limits<double>::lowest();
+		for (auto const& bound : bounds)
+			for (auto const& pt : bound.curve.points) { double u = 0, v = 0; local(pt, u, v); low = std::min(low, v); high = std::max(high, v); }
+		if (!(high > low)) return false;
+		TrimSurface s;
+		s.u0 = 0; s.u1 = last; s.v0 = low; s.v1 = high;
+		double extent = 0;
+		for (auto const& pt : line->flat) extent = std::max(extent, glm::distance(pt, line->flat.front()));
+		const bool closed = extent > 0 && glm::distance(line->flat.front(), line->flat.back()) < extent * 1e-9;
+		s.wrapU = closed;
+		s.point = [=](double u, double v)
+		{
+			double in = u;
+			return glm::dvec3(placement * glm::dvec4(TrimPolyline::at(*profile, in) + d * v, 1.0));
+		};
+		s.project = [=](glm::dvec3 const& pt, glm::dvec2& uv)
+		{
+			double u = 0, v = 0;
+			const double left = local(pt, u, v);
+			if (closed) u += std::round((uv.x - u) / last) * last;
+			uv = { u, glm::clamp(v, low, high) };
+			return left;
+		};
+		s.direct = true;
+		s.creased = 0;
+		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
+	}
 
 	// TODO: sent to bimGeometry
     inline void TriangulateBspline(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double const scaling)

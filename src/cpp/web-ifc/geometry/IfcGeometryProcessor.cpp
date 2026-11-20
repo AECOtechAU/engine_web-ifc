@@ -1982,6 +1982,7 @@ namespace webifc::geometry
             uint32_t profileID = _loader.GetRefArgument();
             IfcProfile profile = _geometryLoader.GetProfile3D(profileID);
 
+            surface.transformation = glm::dmat4(1);
             _loader.MoveToArgumentOffset(expressID, 1);
             if (_loader.GetTokenType() == parsing::IfcTokenType::REF)
             {
@@ -2383,15 +2384,27 @@ namespace webifc::geometry
             }
             else if (surface.CylinderSurface.Active)
             {
-                TriangulateCylindricalSurface(faceGeometry, bounds3D, surface, _settings._circleSegments);
+                if (!TriangulateTrimmedCylinder(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                {
+                    faceGeometry = IfcGeometry();
+                    TriangulateCylindricalSurface(faceGeometry, bounds3D, surface, _settings._circleSegments);
+                }
             }
             else if (surface.RevolutionSurface.Active)
             {
-                TriangulateRevolution(faceGeometry, bounds3D, surface, _settings._circleSegments);
+                if (!TriangulateTrimmedRevolution(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                {
+                    faceGeometry = IfcGeometry();
+                    TriangulateRevolution(faceGeometry, bounds3D, surface, _settings._circleSegments);
+                }
             }
             else if (surface.ExtrusionSurface.Active)
             {
-                TriangulateExtrusion(faceGeometry, bounds3D, surface);
+                if (!TriangulateTrimmedExtrusion(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                {
+                    faceGeometry = IfcGeometry();
+                    TriangulateExtrusion(faceGeometry, bounds3D, surface);
+                }
             }
             else
             {

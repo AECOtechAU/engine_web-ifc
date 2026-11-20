@@ -4,6 +4,7 @@
 #include <memory>
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <functional>
 
 namespace tinynurbs{
 	template<typename T>
@@ -21,6 +22,31 @@ namespace webifc::geometry{
 	constexpr double rotations 		{ 6.0 };
   constexpr auto pi {glm::pi<double>()};
   constexpr auto pi2 {glm::two_pi<double>()};
+
+	// A surface as the trimmed-face mesher needs it
+	struct TrimSurface
+	{
+		double u0 = 0, u1 = 1, v0 = 0, v1 = 1;
+		// The surface meets itself across this direction: parameters run on past the end of the range
+		bool wrapU = false;
+		bool wrapV = false;
+		// Look at the surface to find out whether it meets itself
+		bool findWraps = false;
+		// The nearest point is worked out directly: no starting guess is needed
+		bool direct = false;
+		// The surface turns by the same amount everywhere, and the bounds lie on it
+		bool even = false;
+		// The surface is creased wherever this parameter (0: the first, 1: the second) is a whole number
+		int creased = -1;
+		std::function<glm::dvec3(double, double)> point;
+		// The parameters of the surface point nearest a position, searched from the parameters given and on
+		// the turn of the surface nearest them; returns the distance left
+		std::function<double(glm::dvec3 const&, glm::dvec2&)> project;
+		glm::dvec2 wrapped(glm::dvec2 const& uv) const;
+	};
+
+	// The face inside the bounds, meshed in the surface's parameter plane; false when it could not be
+	bool TriangulateTrimmedSurface(IfcGeometry& geometry, std::vector<IfcBound3D> const& bounds, TrimSurface& surface, double scaling);
 
 	class Nurbs{
 	

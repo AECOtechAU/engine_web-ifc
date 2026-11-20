@@ -6,6 +6,7 @@
 #include <tinynurbs/tinynurbs.h>
 #include <CDT.h>
 #include <numeric>
+#include <unordered_set>
 #include <string>
 
 namespace webifc::geometry{
@@ -14,6 +15,9 @@ namespace webifc::geometry{
 	constexpr double TRIM_TURN_STEP { 0.35 };
 	constexpr int TRIM_MAX_STEPS { 48 };
 	constexpr int TRIM_SEED_GRID { 12 };
+	// An edge may stray from the surface by this share of its length (a chord across TRIM_TURN_STEP)
+	constexpr double TRIM_STRAY { 0.066 };
+	constexpr int TRIM_REFINE_ROUNDS { 6 };
 
 	void Nurbs::fill_geometry(){
 		if (!_initialized) {
@@ -25,15 +29,10 @@ namespace webifc::geometry{
 
 	Nurbs::uv_point_t Nurbs::wrapped(uv_point_t const& uv) const
 	{
-		const auto into = [](double x, double lo, double hi, bool wrap)
-		{
-			if (!wrap) return glm::clamp(x, lo, hi);
-			if (x >= lo && x <= hi) return x;
-			double r = std::fmod(x - lo, hi - lo);
-			if (r < 0) r += hi - lo;
-			return lo + r;
-		};
-		return { into(uv.x, range_knots_u.x, range_knots_u.y, wrapU), into(uv.y, range_knots_v.x, range_knots_v.y, wrapV) };
+		TrimSurface range;
+		range.u0 = range_knots_u.x; range.u1 = range_knots_u.y; range.v0 = range_knots_v.x; range.v1 = range_knots_v.y;
+		range.wrapU = wrapU; range.wrapV = wrapV;
+		return range.wrapped(uv);
 	}
 
 	double Nurbs::project(glm::dvec3 const& pt, uv_point_t& uv) const
@@ -68,21 +67,35 @@ namespace webifc::geometry{
 		return best;
 	}
 
-	bool Nurbs::fill_geometry_trimmed()
+	glm::dvec2 TrimSurface::wrapped(glm::dvec2 const& uv) const
 	{
+		const auto into = [](double x, double lo, double hi, bool wrap)
+		{
+			if (!wrap) return glm::clamp(x, lo, hi);
+			if (x >= lo && x <= hi) return x;
+			double r = std::fmod(x - lo, hi - lo);
+			if (r < 0) r += hi - lo;
+			return lo + r;
+		};
+		return { into(uv.x, u0, u1, wrapU), into(uv.y, v0, v1, wrapV) };
+	}
+
+	bool TriangulateTrimmedSurface(IfcGeometry& geometry, std::vector<IfcBound3D> const& bounds, TrimSurface& s, double scaling)
+	{
+		using uv_point_t = glm::dvec2;
 		try
 		{
-			const double u0 = range_knots_u.x, u1 = range_knots_u.y, v0 = range_knots_v.x, v1 = range_knots_v.y;
+			const double u0 = s.u0, u1 = s.u1, v0 = s.v0, v1 = s.v1;
 			if (!(u1 > u0) || !(v1 > v0)) return false;
-			const double close = 1e-4 / this->scaling; // a tenth of a millimetre
-			const double lost = 5e-3 / this->scaling;
+			const double close = 1e-4 / scaling; // a tenth of a millimetre
+			const double lost = 5e-3 / scaling;
 
 			// A coarse picture of the surface: where to start each search, and how much it turns
-			const int G = TRIM_SEED_GRID;
+			const int G = s.direct ? TRIM_SEED_GRID / 2 : TRIM_SEED_GRID; // a surface worked out directly needs only its turning and lengths from this
 			std::vector<glm::dvec3> grid((G + 1) * (G + 1));
 			for (int i = 0; i <= G; i++)
 				for (int j = 0; j <= G; j++)
-					grid[i * (G + 1) + j] = tinynurbs::surfacePoint(*this->nurbs, u0 + (u1 - u0) * i / G, v0 + (v1 - v0) * j / G);
+					grid[i * (G + 1) + j] = s.point(u0 + (u1 - u0) * i / G, v0 + (v1 - v0) * j / G);
 			const auto seed = [&](glm::dvec3 const& pt, double& interior)
 			{
 				double best = std::numeric_limits<double>::max(); int bi = 0, bj = 0;
@@ -97,6 +110,7 @@ namespace webifc::geometry{
 			};
 
 			// Does the surface meet itself across a direction?
+			if (s.findWraps)
 			{
 				bool u = true, v = true; double extentU = 0, extentV = 0;
 				for (int k = 0; k <= G; k++)
@@ -106,15 +120,15 @@ namespace webifc::geometry{
 					extentU = std::max(extentU, glm::distance(grid[k], grid[(G / 2) * (G + 1) + k]));
 					extentV = std::max(extentV, glm::distance(grid[k * (G + 1)], grid[k * (G + 1) + G / 2]));
 				}
-				this->wrapU = u && extentU > close * 100;
-				this->wrapV = v && extentV > close * 100;
+				s.wrapU = u && extentU > close * 100;
+				s.wrapV = v && extentV > close * 100;
 			}
 			const double periodU = u1 - u0, periodV = v1 - v0;
 
 			// Each bound followed round in the parameter plane, from where it is least in doubt
 			struct Loop { std::vector<uv_point_t> uv; std::vector<glm::dvec3> at; int roundU = 0; int roundV = 0; };
 			std::vector<Loop> loops;
-			for (auto const& bound : this->bounds)
+			for (auto const& bound : bounds)
 			{
 				// a corner given by both edges that meet there is one point
 				std::vector<glm::dvec3> pts;
@@ -122,24 +136,25 @@ namespace webifc::geometry{
 				for (auto const& pt : bound.curve.points) if (pts.empty() || glm::distance(pts.back(), pt) > close * 1e-2) pts.push_back(pt);
 				size_t n = pts.size();
 				while (n > 1 && glm::distance(pts[n - 1], pts[0]) <= close * 1e-2) n--;
-				if (n < 3) { if (&bound == &this->bounds.front()) return false; continue; }
+				if (n < 3) { if (&bound == &bounds.front()) return false; continue; }
 				size_t start = 0; double mostInterior = -1;
 				std::vector<uv_point_t> seeds(n);
-				for (size_t i = 0; i < n; i++)
+				for (size_t i = 0; i < n && !s.direct; i++)
 				{
 					double interior = 0; seeds[i] = seed(pts[i], interior);
 					if (interior > mostInterior) { mostInterior = interior; start = i; }
 				}
+				if (s.direct) seeds[0] = { (u0 + u1) / 2, (v0 + v1) / 2 };
 				const auto follow = [&](glm::dvec3 const& pt, uv_point_t const& previous, uv_point_t fresh, double& left)
 				{
 					uv_point_t uv = previous;
-					left = this->project(pt, uv);
-					if (left > close)
+					left = s.project(pt, uv);
+					if (left > close && !s.direct)
 					{
 						// a fresh start, on the turn of the surface nearest the last point
-						if (this->wrapU) fresh.x += std::round((previous.x - fresh.x) / periodU) * periodU;
-						if (this->wrapV) fresh.y += std::round((previous.y - fresh.y) / periodV) * periodV;
-						const double freshLeft = this->project(pt, fresh);
+						if (s.wrapU) fresh.x += std::round((previous.x - fresh.x) / periodU) * periodU;
+						if (s.wrapV) fresh.y += std::round((previous.y - fresh.y) / periodV) * periodV;
+						const double freshLeft = s.project(pt, fresh);
 						if (freshLeft < left) { left = freshLeft; uv = fresh; }
 					}
 					return uv;
@@ -157,8 +172,8 @@ namespace webifc::geometry{
 				// back at the start: on the same turn of the surface, or one further round?
 				double left = 0;
 				const uv_point_t back = follow(pts[start], previous, seeds[start], left);
-				if (this->wrapU) loop.roundU = static_cast<int>(std::round((back.x - loop.uv[0].x) / periodU));
-				if (this->wrapV) loop.roundV = static_cast<int>(std::round((back.y - loop.uv[0].y) / periodV));
+				if (s.wrapU) loop.roundU = static_cast<int>(std::round((back.x - loop.uv[0].x) / periodU));
+				if (s.wrapV) loop.roundV = static_cast<int>(std::round((back.y - loop.uv[0].y) / periodV));
 				loops.push_back(std::move(loop));
 			}
 			if (loops.empty()) return false;
@@ -184,8 +199,34 @@ namespace webifc::geometry{
 			{
 				// A face that runs right round the surface: two bounds, each once round the same way. It is cut
 				// open along a line from one bound to the other.
-				if (round.size() != 2) return false;
-				Loop& a = loops[round[0]]; Loop& b = loops[round[1]];
+				if (round.size() > 2) return false;
+				Loop pole;
+				if (round.size() == 1)
+				{
+					// One bound only: the face runs up to a point where the surface closes (a pole), which
+					// stands in for the second bound
+					Loop const& only = loops[round[0]];
+					const bool u = only.roundU != 0;
+					const auto closes = [&](bool low)
+					{
+						const int at = low ? 0 : G;
+						for (int k = 1; k <= G; k++)
+							if (glm::distance(u ? grid[k * (G + 1) + at] : grid[at * (G + 1) + k], u ? grid[at] : grid[at * (G + 1)]) > close * 10) return false;
+						return true;
+					};
+					const bool low = closes(true), high = closes(false);
+					if (low == high) return false;
+					const double side = u ? (low ? v0 : v1) : (low ? u0 : u1);
+					const glm::dvec3 tip = u ? grid[low ? 0 : G] : grid[(low ? 0 : G) * (G + 1)];
+					pole.roundU = only.roundU; pole.roundV = only.roundV;
+					for (int k = 0; k < 2; k++)
+					{
+						const double along = (u ? only.uv[0].x : only.uv[0].y) + (u ? periodU : periodV) * 0.5 * k * (((u ? only.roundU : only.roundV) > 0) ? 1 : -1);
+						pole.uv.push_back(u ? uv_point_t{ along, side } : uv_point_t{ side, along });
+						pole.at.push_back(tip);
+					}
+				}
+				Loop& a = loops[round[0]]; Loop& b = round.size() == 2 ? loops[round[1]] : pole;
 				const bool alongU = a.roundU != 0;
 				if (alongU ? (std::abs(a.roundU) != 1 || std::abs(b.roundU) != 1 || a.roundV != 0 || b.roundV != 0)
 				           : (std::abs(a.roundV) != 1 || std::abs(b.roundV) != 1 || a.roundU != 0 || b.roundU != 0)) return false;
@@ -235,7 +276,7 @@ namespace webifc::geometry{
 				Loop& loop = loops[l];
 				// every bound on the same turn of the surface
 				const uv_point_t c = centre(loop);
-				const double byU = this->wrapU ? std::round((home.x - c.x) / periodU) * periodU : 0, byV = this->wrapV ? std::round((home.y - c.y) / periodV) * periodV : 0;
+				const double byU = s.wrapU ? std::round((home.x - c.x) / periodU) * periodU : 0, byV = s.wrapV ? std::round((home.y - c.y) / periodV) * periodV : 0;
 				const auto first = static_cast<CDT::VertInd>(vertices.size());
 				const auto n = static_cast<CDT::VertInd>(loop.uv.size());
 				for (CDT::VertInd i = 0; i < n; i++)
@@ -250,7 +291,7 @@ namespace webifc::geometry{
 			const size_t boundCount = vertices.size();
 
 			// Rows of points inside the face: as many as the surface turns across it
-			const auto turning = [&](bool alongU)
+			const auto turning = [&](bool alongU, bool whole = false)
 			{
 				double most = 0;
 				for (int line = 0; line <= G; line++)
@@ -259,7 +300,15 @@ namespace webifc::geometry{
 					for (int k = 0; k < G; k++)
 					{
 						const double lo = alongU ? u0 + (u1 - u0) * k / G : v0 + (v1 - v0) * k / G, hi = alongU ? u0 + (u1 - u0) * (k + 1) / G : v0 + (v1 - v0) * (k + 1) / G;
-						if (!(alongU ? this->wrapU : this->wrapV) && (hi < (alongU ? minU : minV) || lo > (alongU ? maxU : maxV))) continue;
+						if (!whole)
+						{
+							// on a closed surface the face may lie a turn or two away from the range
+							const double least = alongU ? minU : minV, most_ = alongU ? maxU : maxV, period = alongU ? u1 - u0 : v1 - v0;
+							bool covered = false;
+							for (int turn = ((alongU ? s.wrapU : s.wrapV) ? -2 : 0); turn <= ((alongU ? s.wrapU : s.wrapV) ? 2 : 0) && !covered; turn++)
+								covered = !(hi + turn * period < least || lo + turn * period > most_);
+							if (!covered) continue;
+						}
 						const glm::dvec3 step = alongU ? grid[(k + 1) * (G + 1) + line] - grid[k * (G + 1) + line] : grid[line * (G + 1) + k + 1] - grid[line * (G + 1) + k];
 						const double len = glm::length(step); if (len < 1e-12) continue;
 						const glm::dvec3 dir = step / len;
@@ -268,6 +317,7 @@ namespace webifc::geometry{
 					}
 					most = std::max(most, sum);
 				}
+				if (whole) return most * G / (G - 1.0);
 				// the coarse picture sees a turn only between its own steps: allow for one more
 				const double span = std::min(1.0, alongU ? (maxU - minU) / (u1 - u0) : (maxV - minV) / (v1 - v0));
 				return most * std::min(1.0, span * G / std::max(1.0, span * G - 1.0) );
@@ -292,10 +342,11 @@ namespace webifc::geometry{
 					}
 					if (!clear) continue;
 					vertices.push_back(CDT::V2d<double>{ u, v });
-					const uv_point_t in = this->wrapped({ u, v });
-					positions.push_back(tinynurbs::surfacePoint(*this->nurbs, in.x, in.y));
+					const uv_point_t in = s.wrapped({ u, v });
+					positions.push_back(s.point(in.x, in.y));
 				}
 
+			double stretchU = 1, stretchV = 1;
 			// The parameter plane stretched to the surface's own distances: there the triangulation picks the
 			// triangles that are well shaped on the surface
 			{
@@ -306,13 +357,21 @@ namespace webifc::geometry{
 						alongU += glm::distance(grid[(k + 1) * (G + 1) + line], grid[k * (G + 1) + line]);
 						alongV += glm::distance(grid[line * (G + 1) + k + 1], grid[line * (G + 1) + k]);
 					}
-				const double perU = alongU / (G + 1) / (u1 - u0), perV = alongV / (G + 1) / (v1 - v0);
+				// one unit is one allowed turn of the surface, or a twentieth of its longer side
+				const double longer = std::max(alongU, alongV);
+				const double perU = longer > 0 ? (turning(true, true) / TRIM_TURN_STEP + 0.05 * alongU / longer) / (u1 - u0) : 0;
+				const double perV = longer > 0 ? (turning(false, true) / TRIM_TURN_STEP + 0.05 * alongV / longer) / (v1 - v0) : 0;
 				if (perU > 0 && perV > 0 && std::isfinite(perU) && std::isfinite(perV))
+				{
 					for (auto& v : vertices) { v.x *= perU; v.y *= perV; }
+					stretchU = perU; stretchV = perV;
+				}
 			}
 
 			// Bound points that land on one another in the parameter plane (a pole, a seam met twice) are one vertex
 			const auto duplicates = CDT::RemoveDuplicatesAndRemapEdges(vertices, edges);
+			std::vector<char> onBound(vertices.size(), 0);
+			for (size_t i = 0; i < boundCount; i++) onBound[duplicates.duplicates.empty() ? i : duplicates.mapping[i]] = 1;
 			if (!duplicates.duplicates.empty())
 			{
 				std::vector<glm::dvec3> kept(vertices.size());
@@ -333,13 +392,65 @@ namespace webifc::geometry{
 			}
 			if (once.size() < 3) return false;
 
-			CDT::Triangulation<double> triangulator{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
-			triangulator.insertVertices(vertices);
-			triangulator.insertEdges(once);
-			triangulator.eraseOuterTrianglesAndHoles();
-			if (triangulator.triangles.empty()) return false;
 			(void)boundCount;
-			for (auto const& triangle : triangulator.triangles)
+			const auto edgeKey = [](CDT::VertInd a, CDT::VertInd b) { return (static_cast<uint64_t>(std::min(a, b)) << 32) | static_cast<uint64_t>(std::max(a, b)); };
+			std::vector<uint64_t> fixed;
+			fixed.reserve(once.size());
+			for (auto const& e : once) fixed.push_back(edgeKey(e.v1(), e.v2()));
+			std::sort(fixed.begin(), fixed.end());
+			const size_t mostPoints = vertices.size() * 4 + 128;
+			// where the surface itself puts each vertex (a bound point may sit a hair off it)
+			std::vector<glm::dvec3> onSurface;
+			CDT::TriangleVec triangles;
+			for (int pass = 0;; pass++)
+			{
+				CDT::Triangulation<double> triangulator{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
+				triangulator.insertVertices(vertices);
+				triangulator.insertEdges(once);
+				triangulator.eraseOuterTrianglesAndHoles();
+				triangles = triangulator.triangles;
+				if (triangles.empty()) return false;
+				if (pass == TRIM_REFINE_ROUNDS || vertices.size() >= mostPoints) break;
+				// an inner edge that strays from the surface gets a point at its middle
+				if (s.even) onSurface = positions;
+				for (size_t v = onSurface.size(); v < vertices.size(); v++)
+				{
+					const uv_point_t in = s.wrapped({ vertices[v].x / stretchU, vertices[v].y / stretchV });
+					onSurface.push_back(s.point(in.x, in.y));
+				}
+				std::vector<CDT::V2d<double>> more;
+				std::vector<glm::dvec3> moreAt;
+				for (auto const& triangle : triangles)
+					for (int k = 0; k < 3; k++)
+					{
+						const auto i = triangle.vertices[k], j = triangle.vertices[(k + 1) % 3];
+						if (i > j) continue;
+						if (pass >= 2 && ((i < onBound.size() && onBound[i]) || (j < onBound.size() && onBound[j]))) continue;
+						if (std::binary_search(fixed.begin(), fixed.end(), edgeKey(i, j))) continue;
+						const double length = glm::distance(positions[i], positions[j]);
+						if (length < close * 10) continue;
+						// one unit of the stretched plane is one allowed turn
+						const double span2 = (vertices[i].x - vertices[j].x) * (vertices[i].x - vertices[j].x) + (vertices[i].y - vertices[j].y) * (vertices[i].y - vertices[j].y);
+						if (span2 < (s.even ? 2.0 : 0.04)) continue;
+						// across a crease the split goes on the crease
+						double share = 0.5;
+						if (s.creased >= 0)
+						{
+							const double a = (s.creased == 0 ? vertices[i].x / stretchU : vertices[i].y / stretchV), b = (s.creased == 0 ? vertices[j].x / stretchU : vertices[j].y / stretchV);
+							const double crease = std::round((a + b) / 2);
+							if (crease > std::min(a, b) + 1e-6 && crease < std::max(a, b) - 1e-6) share = (crease - a) / (b - a);
+						}
+						const CDT::V2d<double> mid{ vertices[i].x + (vertices[j].x - vertices[i].x) * share, vertices[i].y + (vertices[j].y - vertices[i].y) * share };
+						const uv_point_t in = s.wrapped({ mid.x / stretchU, mid.y / stretchV });
+						const glm::dvec3 on = s.point(in.x, in.y);
+						if (glm::distance(on, onSurface[i] + (onSurface[j] - onSurface[i]) * share) <= std::max(close * 0.5, length * TRIM_STRAY)) continue;
+						more.push_back(mid); moreAt.push_back(on);
+					}
+				if (more.empty()) break;
+				vertices.insert(vertices.end(), more.begin(), more.end());
+				positions.insert(positions.end(), moreAt.begin(), moreAt.end());
+			}
+			for (auto const& triangle : triangles)
 			{
 				const auto i0 = triangle.vertices[0], i1 = triangle.vertices[1], i2 = triangle.vertices[2];
 				const auto& a = vertices[i0]; const auto& b = vertices[i1]; const auto& c = vertices[i2];
@@ -355,6 +466,20 @@ namespace webifc::geometry{
 		{
 			return false;
 		}
+	}
+
+	bool Nurbs::fill_geometry_trimmed()
+	{
+		TrimSurface s;
+		s.u0 = range_knots_u.x; s.u1 = range_knots_u.y; s.v0 = range_knots_v.x; s.v1 = range_knots_v.y;
+		s.findWraps = true;
+		s.point = [this](double u, double v) { return glm::dvec3(tinynurbs::surfacePoint(*this->nurbs, u, v)); };
+		s.project = [this, &s](glm::dvec3 const& pt, glm::dvec2& uv)
+		{
+			this->wrapU = s.wrapU; this->wrapV = s.wrapV;
+			return this->project(pt, uv);
+		};
+		return TriangulateTrimmedSurface(this->geometry, this->bounds, s, this->scaling);
 	}
 
 	void Nurbs::fill_geometry_legacy(){
