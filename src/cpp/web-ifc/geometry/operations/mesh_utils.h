@@ -593,6 +593,52 @@ namespace webifc::geometry
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
+	// Whether a surface is a sphere, and which: one given as such, or an arc of a circle centred on the axis
+	// it is turned about
+	// looks: +1 when the surface's own normal points out of the ball, -1 when into it (that depends on which way
+	// the profile of a turned surface runs)
+	inline bool SphereOf(IfcSurface const& surface, glm::dvec3& centre, double& radius, int* looks = nullptr)
+	{
+		if (looks) *looks = 1;
+		if (surface.SphereSurface.Active)
+		{
+			centre = surface.transformation[3];
+			radius = surface.SphereSurface.Radius;
+			return radius > 0;
+		}
+		if (!surface.RevolutionSurface.Active || surface.RevolutionSurface.Profile.isComposite) return false;
+		auto const& given = surface.RevolutionSurface.Profile.curve.points;
+		if (given.size() < 3) return false;
+		const glm::dmat4 axis = surface.transformation * surface.RevolutionSurface.Direction;
+		const glm::dvec3 origin = axis[3];
+		const glm::dvec3 Z = glm::normalize(glm::dvec3(axis[2]));
+		std::vector<glm::dvec2> flat;
+		for (auto const& pt : given)
+		{
+			const glm::dvec3 d = glm::dvec3(surface.transformation * glm::dvec4(pt, 1.0)) - origin;
+			const double h = glm::dot(d, Z);
+			flat.emplace_back(glm::length(d - Z * h), h);
+		}
+		const glm::dvec2 a = flat.front(), b = flat[flat.size() / 2], c = flat.back();
+		const double det = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+		const double reach = glm::distance(a, c);
+		if (std::abs(det) < 1e-12 * reach * reach || reach <= 0) return false;
+		const glm::dvec2 middle((glm::dot(a, a) * (b.y - c.y) + glm::dot(b, b) * (c.y - a.y) + glm::dot(c, c) * (a.y - b.y)) / det,
+		                        (glm::dot(a, a) * (c.x - b.x) + glm::dot(b, b) * (a.x - c.x) + glm::dot(c, c) * (b.x - a.x)) / det);
+		radius = glm::distance(a, middle);
+		if (std::abs(middle.x) > radius * 1e-3) return false;
+		for (auto const& pt : flat) if (std::abs(glm::distance(pt, middle) - radius) > radius * 2e-3) return false;
+		centre = origin + Z * middle.y;
+		if (looks)
+		{
+			// the normal is (the way round the axis) x (the way along the profile)
+			const size_t i = flat.size() / 2;
+			const glm::dvec2 step = flat[i] - flat[i - 1], at = (flat[i] + flat[i - 1]) * 0.5;
+			*looks = step.y * at.x - step.x * (at.y - middle.y) >= 0 ? 1 : -1;
+		}
+		return radius > 0;
+	}
+
 	// S(u, v) = the profile point at v turned by u about the axis
 	inline bool TriangulateTrimmedRevolution(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{

@@ -60,6 +60,14 @@ namespace webifc::geometry{
 		glm::dvec2 wrapped(glm::dvec2 const& uv) const;
 	};
 
+	// How many pieces each edge of the icosahedron is cut into for a ball this far across (metres): 20 faces
+	// under 40 mm, 80 under 100 mm, 180 under 300 mm, 320 above, and more where 320 would stray over 10 mm
+	int BallCuts(double acrossMetres);
+	// The whole ball as that solid, faces looking outwards
+	void AddWholeBall(IfcGeometry& geometry, glm::dvec3 const& centre, double radius, double scaling);
+	// A face on a sphere: the corners of that solid inside it, stitched to its outline; false when it could not be
+	bool TriangulateSphereFace(IfcGeometry& geometry, std::vector<IfcBound3D> const& bounds, glm::dvec3 const& centre, double radius, double scaling, int outerTurn, int looks = 1);
+
 	// The face inside the bounds, meshed in the surface's parameter plane; false when it could not be
 	bool TriangulateTrimmedSurface(IfcGeometry& geometry, std::vector<IfcBound3D> const& bounds, TrimSurface& surface, double scaling);
 

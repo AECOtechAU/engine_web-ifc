@@ -1956,6 +1956,18 @@ namespace webifc::geometry
 
             break;
         }
+        case schema::IFCSPHERICALSURFACE:
+        {
+            IfcSurface surface;
+
+            _loader.MoveToArgumentOffset(expressID, 0);
+            surface.transformation = _geometryLoader.GetLocalPlacement(_loader.GetRefArgument());
+            _loader.MoveToArgumentOffset(expressID, 1);
+            surface.SphereSurface.Active = true;
+            surface.SphereSurface.Radius = _loader.GetDoubleArgument();
+
+            return surface;
+        }
         case schema::IFCCYLINDRICALSURFACE:
         {
             IfcSurface surface;
@@ -2319,6 +2331,36 @@ namespace webifc::geometry
             auto faces = _loader.GetSetArgument();
 
             IfcGeometry geometry;
+            // A closed shell whose faces all lie on one sphere is a ball: it is drawn as the ball itself,
+            // not face by face
+            if (lineType == schema::IFCCLOSEDSHELL && !faces.empty())
+            {
+                bool ball = true;
+                glm::dvec3 centre(0);
+                double radius = 0;
+                for (size_t i = 0; i < faces.size() && ball; i++)
+                {
+                    const uint32_t faceID = _loader.GetRefArgument(faces[i]);
+                    ball = _loader.GetLineType(faceID) == schema::IFCADVANCEDFACE;
+                    if (!ball) break;
+                    _loader.MoveToArgumentOffset(faceID, 1);
+                    const uint32_t surfaceID = _loader.GetRefArgument();
+                    const auto kind = _loader.GetLineType(surfaceID);
+                    ball = kind == schema::IFCSURFACEOFREVOLUTION || kind == schema::IFCSPHERICALSURFACE;
+                    if (!ball) break;
+                    glm::dvec3 c(0);
+                    double r = 0;
+                    ball = SphereOf(GetSurface(surfaceID), c, r);
+                    if (!ball) break;
+                    if (i == 0) { centre = c; radius = r; }
+                    else ball = glm::distance(c, centre) < radius * 1e-3 && std::abs(r - radius) < radius * 1e-3;
+                }
+                if (ball && radius > 0)
+                {
+                    AddWholeBall(geometry, centre, radius, _cache.GetLinearScalingFactor());
+                    return geometry;
+                }
+            }
             for (auto &faceToken : faces)
             {
                 uint32_t faceID = _loader.GetRefArgument(faceToken);
@@ -2384,7 +2426,14 @@ namespace webifc::geometry
             // The outer bound runs anticlockwise about the face's normal, which is the surface's when SameSense
             const int outerTurn = bounds3D.empty() || !bounds3D.front().curve.directed ? 0 : (sameSense ? 1 : -1);
 
-            if (surface.BSplineSurface.Active)
+            glm::dvec3 ballCentre(0);
+            double ballRadius = 0;
+            int ballLooks = 1;
+            if (SphereOf(surface, ballCentre, ballRadius, &ballLooks) && TriangulateSphereFace(faceGeometry, bounds3D, ballCentre, ballRadius, _cache.GetLinearScalingFactor(), outerTurn, ballLooks))
+            {
+                // a face on a sphere: the ball's own corners, stitched to the face's outline
+            }
+            else if (surface.BSplineSurface.Active)
             {
                 TriangulateBspline(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor(), outerTurn);
             }

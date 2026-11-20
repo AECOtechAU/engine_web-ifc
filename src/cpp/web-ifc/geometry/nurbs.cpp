@@ -7,6 +7,8 @@
 #include <CDT.h>
 #include <numeric>
 #include <unordered_set>
+#include <map>
+#include <array>
 #include <string>
 
 namespace webifc::geometry{
@@ -68,6 +70,190 @@ namespace webifc::geometry{
 		if (last < best) { best = last; bestUV = at; }
 		uv = bestUV;
 		return best;
+	}
+
+	namespace
+	{
+		struct Ball { std::vector<glm::dvec3> corners; std::vector<std::array<uint32_t, 3>> faces; };
+
+		// The icosahedron with every edge cut into so many pieces and the new corners pushed out to the sphere
+		Ball const& GeodesicBall(int cuts)
+		{
+			static std::map<int, Ball> made;
+			auto found = made.find(cuts);
+			if (found != made.end()) return found->second;
+			const double t = (1.0 + std::sqrt(5.0)) / 2.0;
+			const glm::dvec3 base[12] = { {-1, t, 0}, {1, t, 0}, {-1, -t, 0}, {1, -t, 0}, {0, -1, t}, {0, 1, t}, {0, -1, -t}, {0, 1, -t}, {t, 0, -1}, {t, 0, 1}, {-t, 0, -1}, {-t, 0, 1} };
+			const int sides[20][3] = { {0, 11, 5}, {0, 5, 1}, {0, 1, 7}, {0, 7, 10}, {0, 10, 11}, {1, 5, 9}, {5, 11, 4}, {11, 10, 2}, {10, 7, 6}, {7, 1, 8},
+			                           {3, 9, 4}, {3, 4, 2}, {3, 2, 6}, {3, 6, 8}, {3, 8, 9}, {4, 9, 5}, {2, 4, 11}, {6, 2, 10}, {8, 6, 7}, {9, 8, 1} };
+			Ball ball;
+			std::map<std::array<int64_t, 3>, uint32_t> known;
+			const auto corner = [&](glm::dvec3 const& at)
+			{
+				const glm::dvec3 on = glm::normalize(at);
+				const std::array<int64_t, 3> key { std::llround(on.x * 1e9), std::llround(on.y * 1e9), std::llround(on.z * 1e9) };
+				auto it = known.find(key);
+				if (it != known.end()) return it->second;
+				const uint32_t index = static_cast<uint32_t>(ball.corners.size());
+				ball.corners.push_back(on); known.emplace(key, index);
+				return index;
+			};
+			for (auto const& side : sides)
+			{
+				const glm::dvec3 a = glm::normalize(base[side[0]]), b = glm::normalize(base[side[1]]), c = glm::normalize(base[side[2]]);
+				const auto at = [&](int i, int j) { return corner(a * static_cast<double>(cuts - i - j) + b * static_cast<double>(i) + c * static_cast<double>(j)); };
+				for (int i = 0; i < cuts; i++)
+					for (int j = 0; j < cuts - i; j++)
+					{
+						ball.faces.push_back({ at(i, j), at(i + 1, j), at(i, j + 1) });
+						if (i + j + 1 < cuts) ball.faces.push_back({ at(i + 1, j), at(i + 1, j + 1), at(i, j + 1) });
+					}
+			}
+			return made.emplace(cuts, std::move(ball)).first->second;
+		}
+	}
+
+	int BallCuts(double acrossMetres)
+	{
+		if (acrossMetres < 0.04) return 1;
+		if (acrossMetres < 0.1) return 2;
+		if (acrossMetres < 0.3) return 3;
+		int cuts = 4;
+		// a face's middle sits about 0.29 / cuts^2 of the radius inside the sphere
+		while (cuts < 16 && 0.29 * (acrossMetres / 2) / (cuts * cuts) > 0.010) cuts++;
+		return cuts;
+	}
+
+	void AddWholeBall(IfcGeometry& geometry, glm::dvec3 const& centre, double radius, double scaling)
+	{
+		Ball const& ball = GeodesicBall(BallCuts(2 * radius * scaling));
+		for (auto const& face : ball.faces)
+			geometry.AddFace(centre + ball.corners[face[0]] * radius, centre + ball.corners[face[1]] * radius, centre + ball.corners[face[2]] * radius);
+	}
+
+	bool TriangulateSphereFace(IfcGeometry& geometry, std::vector<IfcBound3D> const& bounds, glm::dvec3 const& centre, double radius, double scaling, int outerTurn, int looks)
+	{
+		try
+		{
+			if (!(radius > 0)) return false;
+			const double close = 1e-4 / scaling;
+			std::vector<std::vector<glm::dvec3>> loops;
+			for (auto const& bound : bounds)
+			{
+				std::vector<glm::dvec3> pts;
+				for (auto const& pt : bound.curve.points) if (pts.empty() || glm::distance(pts.back(), pt) > close * 1e-2) pts.push_back(pt);
+				while (pts.size() > 1 && glm::distance(pts.back(), pts.front()) <= close * 1e-2) pts.pop_back();
+				if (pts.size() < 3) { if (&bound == &bounds.front()) return false; continue; }
+				for (auto const& pt : pts) if (std::abs(glm::distance(pt, centre) - radius) > std::max(5e-3 / scaling, radius * 0.02)) return false;
+				loops.push_back(std::move(pts));
+			}
+			if (loops.empty()) return false;
+
+			// Which side of its outline the face is on: the outline runs anticlockwise about the face's normal,
+			// which looks outwards when the face looks the way the sphere does
+			glm::dvec3 turn(0), mean(0);
+			auto const& outer = loops.front();
+			for (size_t i = 0; i < outer.size(); i++)
+			{
+				turn += glm::cross(outer[i] - centre, outer[(i + 1) % outer.size()] - centre);
+				mean += outer[i] - centre;
+			}
+			mean /= static_cast<double>(outer.size());
+			glm::dvec3 towards;
+			if (outerTurn != 0 && glm::length(turn) > radius * radius * 1e-6) towards = glm::normalize(turn) * static_cast<double>(outerTurn * looks);
+			else if (glm::length(mean) > radius * 0.05) towards = glm::normalize(mean);
+			else return false;
+
+			// The sphere laid flat from the point opposite the face: circles stay circles, so the triangles the
+			// plane picks are the ones the sphere would
+			glm::dvec3 e1 = glm::cross(towards, std::abs(towards.x) < 0.9 ? glm::dvec3(1, 0, 0) : glm::dvec3(0, 1, 0));
+			e1 = glm::normalize(e1);
+			const glm::dvec3 e2 = glm::cross(towards, e1);
+			bool behind = false;
+			const auto flat = [&](glm::dvec3 const& at)
+			{
+				const glm::dvec3 x = (at - centre) / radius;
+				const double d = 1 + glm::dot(x, towards);
+				if (d < 1e-3) { behind = true; return CDT::V2d<double>{ 0, 0 }; }
+				return CDT::V2d<double>{ glm::dot(x, e1) / d, glm::dot(x, e2) / d };
+			};
+			std::vector<CDT::V2d<double>> vertices;
+			std::vector<glm::dvec3> positions;
+			std::vector<CDT::Edge> edges;
+			for (auto const& loop : loops)
+			{
+				const auto first = static_cast<CDT::VertInd>(vertices.size());
+				const auto n = static_cast<CDT::VertInd>(loop.size());
+				for (CDT::VertInd i = 0; i < n; i++)
+				{
+					vertices.push_back(flat(loop[i])); positions.push_back(loop[i]);
+					edges.emplace_back(first + i, first + (i + 1) % n);
+				}
+			}
+			if (behind) return false;
+			const size_t outline = vertices.size();
+
+			// The ball's own corners that fall inside the face, clear of its outline
+			const int cuts = BallCuts(2 * radius * scaling);
+			Ball const& ball = GeodesicBall(cuts);
+			const double clear = radius * 1.107 / cuts * 0.4;
+			for (auto const& unit : ball.corners)
+			{
+				if (glm::dot(unit, towards) < -0.9) continue;
+				const glm::dvec3 at = centre + unit * radius;
+				const CDT::V2d<double> q = flat(at);
+				bool inside = false, tooNear = false;
+				for (size_t e = 0; e < outline && !tooNear; e++)
+				{
+					const auto& a = vertices[edges[e].v1()]; const auto& b = vertices[edges[e].v2()];
+					if ((a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+					const glm::dvec3 pa = positions[edges[e].v1()], ab = positions[edges[e].v2()] - pa;
+					const double len2 = glm::dot(ab, ab);
+					const double t = len2 > 0 ? glm::clamp(glm::dot(at - pa, ab) / len2, 0.0, 1.0) : 0.0;
+					if (glm::distance(at, pa + ab * t) < clear) tooNear = true;
+				}
+				if (!inside || tooNear) continue;
+				vertices.push_back(q); positions.push_back(at);
+			}
+			behind = false;
+
+			const auto duplicates = CDT::RemoveDuplicatesAndRemapEdges(vertices, edges);
+			if (!duplicates.duplicates.empty())
+			{
+				std::vector<glm::dvec3> kept(vertices.size());
+				for (size_t i = positions.size(); i-- > 0;) kept[duplicates.mapping[i]] = positions[i];
+				positions = std::move(kept);
+			}
+			edges.erase(std::remove_if(edges.begin(), edges.end(), [](CDT::Edge const& e) { return e.v1() == e.v2(); }), edges.end());
+			std::sort(edges.begin(), edges.end(), [](CDT::Edge const& a, CDT::Edge const& b) { return a.v1() != b.v1() ? a.v1() < b.v1() : a.v2() < b.v2(); });
+			std::vector<CDT::Edge> once;
+			for (size_t i = 0; i < edges.size();)
+			{
+				size_t j = i; while (j < edges.size() && edges[j] == edges[i]) j++;
+				if ((j - i) % 2 == 1) once.push_back(edges[i]);
+				i = j;
+			}
+			if (once.size() < 3) return false;
+			CDT::Triangulation<double> whole{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
+			whole.insertVertices(vertices);
+			whole.insertEdges(once);
+			whole.eraseOuterTrianglesAndHoles();
+			if (whole.triangles.empty()) return false;
+			for (auto const& triangle : whole.triangles)
+			{
+				glm::dvec3 p0 = positions[triangle.vertices[0]], p1 = positions[triangle.vertices[1]], p2 = positions[triangle.vertices[2]];
+				const glm::dvec3 normal = glm::cross(p1 - p0, p2 - p0);
+				if (glm::length(normal) < 1e-18) continue;
+				// looking the way the surface does: out of the ball, or into it
+				if ((glm::dot(normal, (p0 + p1 + p2) / 3.0 - centre) < 0) != (looks < 0)) std::swap(p1, p2);
+				geometry.AddFace(p0, p1, p2);
+			}
+			return true;
+		}
+		catch (...)
+		{
+			return false;
+		}
 	}
 
 	glm::dvec2 TrimSurface::wrapped(glm::dvec2 const& uv) const
