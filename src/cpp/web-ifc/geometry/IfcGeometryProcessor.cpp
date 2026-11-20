@@ -2077,7 +2077,8 @@ namespace webifc::geometry
 
         // A pipe, duct or conduit run is round with 18 sides whatever its size
         const auto elementType = _loader.GetLineType(expressID);
-        RoundRunSides() = elementType == schema::IFCPIPESEGMENT || elementType == schema::IFCDUCTSEGMENT || elementType == schema::IFCCABLECARRIERSEGMENT || elementType == schema::IFCFLOWSEGMENT ? 18 : 0;
+        const bool run = elementType == schema::IFCPIPESEGMENT || elementType == schema::IFCDUCTSEGMENT || elementType == schema::IFCCABLECARRIERSEGMENT || elementType == schema::IFCFLOWSEGMENT;
+        RoundRunSides() = run ? 18 : 0;
         IfcComposedMesh composedMesh = GetMesh(expressID);
         RoundRunSides() = 0;
 
@@ -2085,6 +2086,24 @@ namespace webifc::geometry
         if (applyLinearScalingFactor)
         {
             mat = glm::scale(glm::dvec3(_cache.GetLinearScalingFactor()));
+        }
+
+        // Where a run's ports are connected to other ports its ends are hidden by what it joins: no caps there
+        _joinedEnds.clear();
+        if (run)
+        {
+            ReadPorts();
+            const auto ports = _portsOf.find(expressID);
+            if (ports != _portsOf.end())
+                for (const uint32_t port : ports->second)
+                {
+                    if (!_connectedPorts.count(port)) continue;
+                    _loader.MoveToArgumentOffset(port, 5);
+                    if (_loader.GetTokenType() != parsing::IfcTokenType::REF) continue;
+                    _loader.StepBack();
+                    const glm::dmat4 placed = _transformation * NormalizeIFC * mat * _geometryLoader.GetLocalPlacement(_loader.GetRefArgument());
+                    _joinedEnds.push_back(glm::dvec3(placed[3]));
+                }
         }
 
         glm::dvec4 color = glm::dvec4(1, 1, 1, 1);
@@ -2173,6 +2192,11 @@ namespace webifc::geometry
             geometry.hasColor = newHasColor;
 
             geometry.transformation = _coordinationMatrix * newMatrix * translation;
+            if (!_joinedEnds.empty())
+            {
+                IfcGeometry open = _expressIDToGeometry[composedMesh.expressID];
+                if (DropEndCaps(open, newMatrix * translation)) _expressIDToGeometry[composedMesh.expressID] = open;
+            }
 
             geometry.SetFlatTransformation();
             geometry.geometryExpressID = composedMesh.expressID;
@@ -2189,6 +2213,76 @@ namespace webifc::geometry
         {
             AddComposedMeshToFlatMesh(flatMesh, c, newMatrix, newParentColor, newHasColor);
         }
+    }
+
+    void IfcGeometryProcessor::ReadPorts()
+    {
+        if (_portsRead) return;
+        _portsRead = true;
+        // IFC4 nests ports under their element; IFC2x3 ties each port to it
+        for (const uint32_t rel : _loader.GetExpressIDsWithType(schema::IFCRELNESTS))
+        {
+            _loader.MoveToArgumentOffset(rel, 4);
+            const uint32_t element = _loader.GetRefArgument();
+            _loader.MoveToArgumentOffset(rel, 5);
+            for (const auto &token : _loader.GetSetArgument())
+            {
+                const uint32_t nested = _loader.GetRefArgument(token);
+                if (_loader.GetLineType(nested) == schema::IFCDISTRIBUTIONPORT) _portsOf[element].push_back(nested);
+            }
+        }
+        for (const uint32_t rel : _loader.GetExpressIDsWithType(schema::IFCRELCONNECTSPORTTOELEMENT))
+        {
+            _loader.MoveToArgumentOffset(rel, 4);
+            const uint32_t port = _loader.GetRefArgument();
+            _loader.MoveToArgumentOffset(rel, 5);
+            _portsOf[_loader.GetRefArgument()].push_back(port);
+        }
+        for (const uint32_t rel : _loader.GetExpressIDsWithType(schema::IFCRELCONNECTSPORTS))
+        {
+            _loader.MoveToArgumentOffset(rel, 4);
+            _connectedPorts.insert(_loader.GetRefArgument());
+            _loader.MoveToArgumentOffset(rel, 5);
+            _connectedPorts.insert(_loader.GetRefArgument());
+        }
+    }
+
+    // Takes out the flat end of a run at each joined end: the triangles whose plane passes through the port and
+    // whose corners all lie about the port. True when something went.
+    bool IfcGeometryProcessor::DropEndCaps(IfcGeometry &geometry, const glm::dmat4 &placed) const
+    {
+        std::vector<glm::dvec3> at(geometry.numPoints);
+        for (uint32_t i = 0; i < geometry.numPoints; i++) at[i] = glm::dvec3(placed * glm::dvec4(geometry.GetPoint(i), 1.0));
+        std::vector<char> gone(geometry.numFaces, 0);
+        bool any = false;
+        for (const glm::dvec3 &port : _joinedEnds)
+        {
+            // the rim of the end is the ring of corners nearest the port
+            double rim = std::numeric_limits<double>::max();
+            for (const auto &pt : at) { const double d = glm::distance(pt, port); if (d > 5e-4 && d < rim) rim = d; }
+            if (rim > 5.0) continue;
+            for (uint32_t f = 0; f < geometry.numFaces; f++)
+            {
+                const auto face = geometry.GetFace(f);
+                const glm::dvec3 a = at[face.i0], b = at[face.i1], c = at[face.i2];
+                const glm::dvec3 normal = glm::cross(b - a, c - a);
+                const double size = glm::length(normal);
+                if (size <= 0) continue;
+                if (std::abs(glm::dot(a - port, normal / size)) > 5e-4) continue;
+                if (glm::distance(a, port) > rim * 4 || glm::distance(b, port) > rim * 4 || glm::distance(c, port) > rim * 4) continue;
+                gone[f] = 1; any = true;
+            }
+        }
+        if (!any) return false;
+        IfcGeometry kept;
+        for (uint32_t f = 0; f < geometry.numFaces; f++)
+        {
+            if (gone[f]) continue;
+            const auto face = geometry.GetFace(f);
+            kept.AddFace(geometry.GetPoint(face.i0), geometry.GetPoint(face.i1), geometry.GetPoint(face.i2));
+        }
+        geometry = kept;
+        return true;
     }
 
     IfcGeometry IfcGeometryProcessor::BoolProcess(const std::vector<IfcGeometry> &firstGeoms, std::vector<IfcGeometry> &secondGeoms, std::string op, IfcGeometrySettings _settings)

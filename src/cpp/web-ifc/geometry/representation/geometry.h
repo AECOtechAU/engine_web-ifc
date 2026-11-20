@@ -54,22 +54,46 @@ namespace webifc::geometry {
 		}
 
 		// How much of a turn one side of a round thing covers, by its radius in metres. Sides by diameter: under
-		// 10 mm 4, 25 mm 6, 39 mm 8, 60 mm 10, 150 mm 12, 300 mm 18, above that 20 per 300 mm (at most 96); and
-		// never further than 10 mm from the curve. The table the .frag exporter uses in Revit.
+		// 10 mm 4, 25 mm 6, 39 mm 8, 60 mm 10, 150 mm 12, 300 mm 18, above that 20; and never further than 10 mm
+		// from the curve, which is what sets the sides of anything over about 1.6 m across. The table the .frag
+		// exporter uses in Revit, but for its last band: there it grows by 20 sides per 300 mm, which on IFC
+		// doubled the time booleans took on slabs cut round columns and more than doubled a landscape model.
 		inline double RoundStep(double radiusMetres)
 		{
 			const double mm = 2000 * radiusMetres;
-			double sides = mm < 10 ? 4 : mm < 25 ? 6 : mm < 39 ? 8 : mm < 60 ? 10 : mm < 150 ? 12 : mm < 300 ? 18 : std::min(96.0, std::max(20.0, std::round(20 * mm / 300)));
+			double sides = mm < 10 ? 4 : mm < 25 ? 6 : mm < 39 ? 8 : mm < 60 ? 10 : mm < 150 ? 12 : mm < 300 ? 18 : 20.0;
 			if (RoundRunSides() > 0) sides = RoundRunSides();
 			double step = 6.283185307179586 / sides;
 			if (radiusMetres > 0.010) step = std::min(step, 2 * std::acos(1 - 0.010 / radiusMetres));
 			return step;
 		}
 
-		// The straight pieces an arc of that radius and sweep is drawn with
+		// The straight pieces an arc of that radius and sweep is drawn with. A fillet (radius under 25 mm, sweep
+		// up to 120 degrees) is two at most.
 		inline int RoundSegments(double radiusMetres, double sweep)
 		{
-			return std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / RoundStep(radiusMetres) - 1e-6)));
+			const int pieces = std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / RoundStep(radiusMetres) - 1e-6)));
+			if (radiusMetres < 0.025 && std::abs(sweep) <= 2.0944 + 1e-6 && RoundRunSides() == 0) return std::min(pieces, 2);
+			return pieces;
+		}
+
+		// The sides of a whole circle of that radius
+		inline int RoundSides(double radiusMetres)
+		{
+			return std::max(3, static_cast<int>(std::round(6.283185307179586 / RoundStep(radiusMetres))));
+		}
+
+		// The straight pieces for the arc from a through b to c (lengths in the curve's own units)
+		template <typename P> inline int RoundSegmentsThrough(const P &a, const P &b, const P &c, double metres)
+		{
+			const double ab = glm::distance(a, b), bc = glm::distance(b, c), ca = glm::distance(c, a);
+			const double half = (ab + bc + ca) / 2;
+			const double area = std::sqrt(std::max(0.0, half * (half - ab) * (half - bc) * (half - ca)));
+			if (area <= 0 || ab <= 0 || bc <= 0) return 1;
+			const double radius = ab * bc * ca / (4 * area);
+			// the arc through b is the part of the circle the angle at b does not look across
+			const double atB = std::acos(glm::clamp((ab * ab + bc * bc - ca * ca) / (2 * ab * bc), -1.0, 1.0));
+			return RoundSegments(radius * metres, 6.283185307179586 - 2 * atB);
 		}
 
 		struct IfcTrimmingSelect

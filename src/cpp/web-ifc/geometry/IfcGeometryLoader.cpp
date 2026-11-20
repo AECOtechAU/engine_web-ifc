@@ -2349,7 +2349,7 @@ namespace webifc::geometry
             if (sg.type == "IFCARCINDEX")
             {
               auto pts = ReadIfcCartesianPointList2D(ptsRef);
-              IfcCurve arc = BuildArc3Pt(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], _circleSegments);
+              IfcCurve arc = BuildArc3Pt(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], static_cast<uint16_t>(RoundSegmentsThrough(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], _cache.GetLinearScalingFactor()) + 1));
               for (auto &pt : arc.points)
               {
                 curve.Add(pt);
@@ -2388,7 +2388,7 @@ namespace webifc::geometry
             if (sg.type == "IFCARCINDEX")
             {
               auto pts = ReadIfcCartesianPointList3D(ptsRef);
-              IfcCurve arc = Build3DArc3Pt(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], _circleSegments, EPS_MINISCULE);
+              IfcCurve arc = Build3DArc3Pt(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], static_cast<uint16_t>(RoundSegmentsThrough(pts[sg.indexs[0] - 1], pts[sg.indexs[1] - 1], pts[sg.indexs[2] - 1], _cache.GetLinearScalingFactor())), EPS_MINISCULE);
               for (auto &pt : arc.points)
               {
                 // Fragments -> Issue #89 -> requires not to skip overlapped points, this is why "removeCoincident" is set to false
@@ -2575,9 +2575,8 @@ namespace webifc::geometry
         curve.arcSegments.push_back(curve.points.size());
         int numPointsCurrentArc = _circleSegments;
         numPointsCurrentArc = std::max(numPointsCurrentArc, 4);
-        // the circular edge of a brep: sides by its size and sweep
-        if (params.edge && dimensions == 3)
-          numPointsCurrentArc = RoundSegments(std::max(radius1, radius2) * _cache.GetLinearScalingFactor(), openingAngleRad) + 1;
+        // sides by the circle's size and the arc's sweep
+        numPointsCurrentArc = RoundSegments(std::max(radius1, radius2) * _cache.GetLinearScalingFactor(), openingAngleRad) + 1;
         double deltaAngle = openingAngleRad / (numPointsCurrentArc - 1);
         double angle = startRad;
         std::vector<glm::dvec3> points;
@@ -3690,7 +3689,7 @@ namespace webifc::geometry
         placement = GetAxis2Placement2D(placementID);
       }
 
-      profile.curve = GetCircleCurve(radius, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement);
+      profile.curve = GetCircleCurve(radius, RoundSides(radius * _cache.GetLinearScalingFactor()) + 1, placement);
 
       return profile;
     }
@@ -3733,8 +3732,8 @@ namespace webifc::geometry
         placement = GetAxis2Placement2D(placementID);
       }
 
-      profile.curve = GetCircleCurve(radius, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement);
-      profile.holes.push_back(GetCircleCurve(radius - thickness, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement));
+      profile.curve = GetCircleCurve(radius, RoundSides(radius * _cache.GetLinearScalingFactor()) + 1, placement);
+      profile.holes.push_back(GetCircleCurve(radius - thickness, RoundSides(radius * _cache.GetLinearScalingFactor()) + 1, placement));
       std::reverse(profile.holes[0].points.begin(), profile.holes[0].points.end());
 
       return profile;
