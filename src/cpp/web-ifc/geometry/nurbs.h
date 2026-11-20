@@ -69,5 +69,9 @@ namespace webifc::geometry{
 		double dv{0.0};
 		double pr{0.0};
 		bool _initialized = false;
+		// The surface meets itself across this direction: parameters run on past the end of the range
+		bool wrapU = false;
+		bool wrapV = false;
+		uv_point_t wrapped(uv_point_t const& uv) const;
 	};
 }
