@@ -49,6 +49,10 @@ namespace webifc::geometry{
 		double turnStep = 0.35;
 		// An inner edge may stray from the surface by this share of its length before it is split
 		double stray = 0.066;
+		// An inner edge this near the surface (in the surface's own units) is never split
+		double allow = 0;
+		// The length of an edge across one allowed turn (in the surface's own units), where known
+		double unit = 0;
 		std::function<glm::dvec3(double, double)> point;
 		// The parameters of the surface point nearest a position, searched from the parameters given and on
 		// the turn of the surface nearest them; returns the distance left

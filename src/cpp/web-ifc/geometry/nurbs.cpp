@@ -141,6 +141,7 @@ namespace webifc::geometry{
 				}
 			}
 
+			bool reachesLow = false, reachesHigh = false;
 			// Each bound followed round in the parameter plane, from where it is least in doubt
 			struct Loop { std::vector<uv_point_t> uv; std::vector<glm::dvec3> at; int roundU = 0; int roundV = 0; };
 			std::vector<Loop> loops;
@@ -175,7 +176,7 @@ namespace webifc::geometry{
 					}
 					return uv;
 				};
-				// A bound through two poles of the surface (the outline of a slice of a ball): at a pole the turn
+				// A bound through a pole of the surface, or two (the outline of a slice of a ball): at a pole the turn
 				// about the axis is free, so each run between poles is followed on its own, and the runs are set
 				// side by side the way the bound's direction asks
 				if (s.wrapU && (poleLow || poleHigh))
@@ -189,7 +190,7 @@ namespace webifc::geometry{
 					size_t poleRuns = 0, first = n;
 					for (size_t i = 0; i < n; i++)
 						if (atPole[i] && !atPole[(i + n - 1) % n]) { poleRuns++; if (first == n) first = i; }
-					if (poleRuns >= 2)
+					if (poleRuns >= 1)
 					{
 						struct Run { std::vector<uv_point_t> uv; std::vector<glm::dvec3> at; int before = 0, after = 0; };
 						std::vector<Run> runs;
@@ -211,7 +212,8 @@ namespace webifc::geometry{
 							run.after = atPole[(first + k) % n];
 							runs.push_back(std::move(run));
 						}
-						if (runs.size() < 2 || runs.size() > 4) return false;
+						if (runs.empty() || runs.size() > 4) return false;
+						for (auto const& run : runs) { if (run.before == 1 || run.after == 1) reachesLow = true; if (run.before == 2 || run.after == 2) reachesHigh = true; }
 						const int want = s.outerTurn * (&bound == &bounds.front() ? 1 : -1);
 						const auto poleAt = [&](int which) { return which == 1 ? v0 : v1; };
 						const auto build = [&](std::vector<int> const& turns, Loop& made)
@@ -220,9 +222,37 @@ namespace webifc::geometry{
 							for (size_t r = 0; r < runs.size(); r++)
 							{
 								const double by = turns[r] * periodU;
-								made.uv.push_back({ runs[r].uv.front().x + by, poleAt(runs[r].before) }); made.at.push_back(runs[r].before == 1 ? tipLow : tipHigh);
+								// between a pole and a run that does not start beside it (the file left that edge out)
+								// the outline follows the surface straight to the pole
+								const auto leg = [&](uv_point_t const& from, uv_point_t const& to, glm::dvec3 const& atFrom, glm::dvec3 const& atTo)
+								{
+									if (glm::distance(atFrom, atTo) < close * 20) return;
+									// as many pieces as the edge next door gets: an arc of this size and sweep
+									const uv_point_t half = s.wrapped({ from.x, (from.y + to.y) / 2 });
+									const glm::dvec3 middle = s.point(half.x, half.y);
+									const double chord = glm::distance(atFrom, atTo);
+									const double rise = glm::distance(middle, (atFrom + atTo) * 0.5);
+									int pieces = 1;
+									if (rise > chord * 1e-4)
+									{
+										const double radius = (chord * chord / 4 + rise * rise) / (2 * rise);
+										pieces = glm::clamp(RoundSegments(radius * scaling, 2 * std::asin(glm::clamp(chord / (2 * radius), 0.0, 1.0))), 1, 64);
+									}
+									for (int piece = 1; piece < pieces; piece++)
+									{
+										const uv_point_t q { from.x, from.y + (to.y - from.y) * piece / pieces };
+										const uv_point_t inside = s.wrapped(q);
+										made.uv.push_back(q); made.at.push_back(s.point(inside.x, inside.y));
+									}
+								};
+								const glm::dvec3 tipBefore = runs[r].before == 1 ? tipLow : tipHigh, tipAfter = runs[r].after == 1 ? tipLow : tipHigh;
+								const uv_point_t poleBefore { runs[r].uv.front().x + by, poleAt(runs[r].before) }, poleAfter { runs[r].uv.back().x + by, poleAt(runs[r].after) };
+								const uv_point_t first { runs[r].uv.front().x + by, runs[r].uv.front().y }, lastOf { runs[r].uv.back().x + by, runs[r].uv.back().y };
+								made.uv.push_back(poleBefore); made.at.push_back(tipBefore);
+								leg(poleBefore, first, tipBefore, runs[r].at.front());
 								for (size_t q = 0; q < runs[r].uv.size(); q++) { made.uv.push_back({ runs[r].uv[q].x + by, runs[r].uv[q].y }); made.at.push_back(runs[r].at[q]); }
-								made.uv.push_back({ runs[r].uv.back().x + by, poleAt(runs[r].after) }); made.at.push_back(runs[r].after == 1 ? tipLow : tipHigh);
+								leg(lastOf, poleAfter, runs[r].at.back(), tipAfter);
+								made.uv.push_back(poleAfter); made.at.push_back(tipAfter);
 							}
 							double area = 0, along = 0;
 							for (size_t q = 0; q < made.uv.size(); q++)
@@ -244,7 +274,7 @@ namespace webifc::geometry{
 							for (size_t r = 1; r < runs.size(); r++) { turns[r] = static_cast<int>(rest % 3) - 1; rest /= 3; }
 							const auto [area, along] = build(turns, made);
 							const int sign = area > 0 ? 1 : (area < 0 ? -1 : 0);
-							if (sign == 0 || (want != 0 && sign != want)) continue;
+							if (sign == 0 || (want != 0 && runs.size() > 1 && sign != want)) continue;
 							if (along < bestAlong - periodU * 1e-6) { otherAlong = bestAlong; otherSign = bestSign; bestAlong = along; bestSign = sign; bestTurns = turns; }
 							else if (along < otherAlong) { otherAlong = along; otherSign = sign; }
 						}
@@ -366,6 +396,7 @@ namespace webifc::geometry{
 					};
 					const bool low = closes(true), high = closes(false);
 					if (low == high) return false;
+					if (u) { if (low) reachesLow = true; else reachesHigh = true; }
 					const double side = u ? (low ? v0 : v1) : (low ? u0 : u1);
 					const glm::dvec3 tip = u ? grid[low ? 0 : G] : grid[(low ? 0 : G) * (G + 1)];
 					pole.roundU = only.roundU; pole.roundV = only.roundV;
@@ -480,9 +511,27 @@ namespace webifc::geometry{
 			const int stepsU = glm::clamp(static_cast<int>(std::ceil(turning(true) / s.turnStep)), 1, TRIM_MAX_STEPS);
 			const int stepsV = glm::clamp(static_cast<int>(std::ceil(turning(false) / s.turnStep)), 1, TRIM_MAX_STEPS);
 			const double stepU = (maxU - minU) / stepsU, stepV = (maxV - minV) / stepsV;
+			// Where the surface closes in (towards a pole) the points of a row lie closer together than
+			// elsewhere: such a row keeps only every few of them, so that its points stay as far apart
+			std::vector<int> every(stepsV + 1, 1);
+			if (stepsU > 2 && stepsV > 1)
+			{
+				std::vector<double> apart(stepsV + 1, 0);
+				double widestApart = 0;
+				const double uMid = minU + stepU * (stepsU / 2);
+				for (int j = 1; j < stepsV; j++)
+				{
+					const uv_point_t a = s.wrapped({ uMid, minV + stepV * j }), b = s.wrapped({ uMid + stepU, minV + stepV * j });
+					apart[j] = glm::distance(s.point(a.x, a.y), s.point(b.x, b.y));
+					widestApart = std::max(widestApart, apart[j]);
+				}
+				for (int j = 1; j < stepsV; j++)
+					every[j] = apart[j] > 0 ? glm::clamp(static_cast<int>(widestApart / apart[j] + 0.25), 1, stepsU) : stepsU;
+			}
 			for (int i = 1; i < stepsU; i++)
 				for (int j = 1; j < stepsV; j++)
 				{
+					if (i % every[j] != 0) continue;
 					const double u = minU + stepU * i, v = minV + stepV * j;
 					// not on top of the boundary: that only makes slivers
 					bool clear = true;
@@ -505,6 +554,7 @@ namespace webifc::geometry{
 			// sides, each run along the direction the surface turns in
 			CDT::TriangleVec triangles;
 			bool strip = false;
+			bool planeAboutLowPole = false;
 			if (round.empty() && loops.size() == 1 && vertices.size() == boundCount && (stepsU == 1 || stepsV == 1))
 			{
 				for (int tryAxis = 0; tryAxis < 2 && !strip; tryAxis++)
@@ -556,6 +606,22 @@ namespace webifc::geometry{
 			if (!strip)
 			{
 			double stretchU = 1, stretchV = 1;
+			// The parameters of every vertex, whatever plane the triangles are chosen in
+			std::vector<uv_point_t> params(vertices.size());
+			for (size_t i = 0; i < vertices.size(); i++) params[i] = { vertices[i].x, vertices[i].y };
+			// A face that reaches one pole: a map centred on the pole, distance from it turned by the angle about
+			// the axis. The pole is then one point, and the surface round it is laid out nearly true to size.
+			const bool aboutPole = s.wrapU && reachesLow != reachesHigh;
+			planeAboutLowPole = aboutPole && reachesLow;
+			const glm::dvec3 tip = reachesLow ? tipLow : tipHigh;
+			const auto inPlane = [&](uv_point_t const& uv, glm::dvec3 const& at)
+			{
+				const double far = glm::distance(at, tip);
+				return CDT::V2d<double>{ far * std::cos(uv.x), far * std::sin(uv.x) };
+			};
+			if (aboutPole)
+				for (size_t i = 0; i < vertices.size(); i++) vertices[i] = inPlane(params[i], positions[i]);
+			else
 			// The parameter plane stretched to the surface's own distances: there the triangulation picks the
 			// triangles that are well shaped on the surface
 			{
@@ -588,6 +654,9 @@ namespace webifc::geometry{
 				// the first of each group wins, as the remap keeps it
 				for (size_t i = positions.size(); i-- > 0;) kept[duplicates.mapping[i]] = positions[i];
 				positions = std::move(kept);
+				std::vector<uv_point_t> keptParams(vertices.size());
+				for (size_t i = params.size(); i-- > 0;) keptParams[duplicates.mapping[i]] = params[i];
+				params = std::move(keptParams);
 			}
 			edges.erase(std::remove_if(edges.begin(), edges.end(), [](CDT::Edge const& e) { return e.v1() == e.v2(); }), edges.end());
 			std::sort(edges.begin(), edges.end(), [](CDT::Edge const& a, CDT::Edge const& b) { return a.v1() != b.v1() ? a.v1() < b.v1() : a.v2() < b.v2(); });
@@ -631,7 +700,7 @@ namespace webifc::geometry{
 					if (s.even) return positions[v];
 					if (!known[v])
 					{
-						const uv_point_t in = s.wrapped({ vertices[v].x / stretchU, vertices[v].y / stretchV });
+						const uv_point_t in = s.wrapped(params[v]);
 						onSurface[v] = s.point(in.x, in.y); known[v] = 1;
 					}
 					return onSurface[v];
@@ -648,7 +717,8 @@ namespace webifc::geometry{
 						const double length = glm::distance(positions[i], positions[j]);
 						if (length < close * 10) continue;
 						// one unit of the stretched plane is one allowed turn
-						const double span2 = (vertices[i].x - vertices[j].x) * (vertices[i].x - vertices[j].x) + (vertices[i].y - vertices[j].y) * (vertices[i].y - vertices[j].y);
+						const double span2 = aboutPole ? (s.unit > 0 ? (length / s.unit) * (length / s.unit) : 1e9)
+							: (vertices[i].x - vertices[j].x) * (vertices[i].x - vertices[j].x) + (vertices[i].y - vertices[j].y) * (vertices[i].y - vertices[j].y);
 						if (span2 < (s.even ? TRIM_EVEN_SKIP : 0.04)) continue;
 						// across a crease the split goes on the crease
 						double share = 0.5;
@@ -664,12 +734,22 @@ namespace webifc::geometry{
 								if (other * other < TRIM_EVEN_SKIP) continue;
 							}
 						}
-						const CDT::V2d<double> mid{ vertices[i].x + (vertices[j].x - vertices[i].x) * share, vertices[i].y + (vertices[j].y - vertices[i].y) * share };
-						const uv_point_t in = s.wrapped({ mid.x / stretchU, mid.y / stretchV });
+						// the middle in the parameters: at the pole the angle is the other end's, and the two ends are
+						// taken on the same turn
+						uv_point_t uvI = params[i], uvJ = params[j];
+						if (aboutPole)
+						{
+							if (glm::distance(positions[i], tip) < close) uvI.x = uvJ.x;
+							else if (glm::distance(positions[j], tip) < close) uvJ.x = uvI.x;
+							uvJ.x += std::round((uvI.x - uvJ.x) / periodU) * periodU;
+						}
+						const uv_point_t midUV = uvI + (uvJ - uvI) * share;
+						const uv_point_t in = s.wrapped(midUV);
 						const glm::dvec3 on = s.point(in.x, in.y);
+						const CDT::V2d<double> mid = aboutPole ? inPlane(midUV, on) : CDT::V2d<double>{ midUV.x * stretchU, midUV.y * stretchV };
 						const glm::dvec3 atI = surfaceAt(i), atJ = surfaceAt(j);
-						if (glm::distance(on, atI + (atJ - atI) * share) <= std::max(close * 0.5, length * s.stray)) continue;
-						more.push_back(mid); moreAt.push_back(on);
+						if (glm::distance(on, atI + (atJ - atI) * share) <= std::max(std::max(close * 0.5, s.allow), length * s.stray)) continue;
+						more.push_back(mid); moreAt.push_back(on); params.push_back(midUV);
 					}
 				if (more.empty()) break;
 				vertices.insert(vertices.end(), more.begin(), more.end());
@@ -679,12 +759,14 @@ namespace webifc::geometry{
 			}
 			for (auto const& triangle : triangles)
 			{
+				// the map about a pole at the low end of the second parameter is the parameter plane mirrored
+				const bool turned = planeAboutLowPole;
 				const auto i0 = triangle.vertices[0], i1 = triangle.vertices[1], i2 = triangle.vertices[2];
 				const auto& a = vertices[i0]; const auto& b = vertices[i1]; const auto& c = vertices[i2];
 				glm::dvec3 p0 = positions[i0], p1 = positions[i1], p2 = positions[i2];
 				if (glm::length(glm::cross(p1 - p0, p2 - p0)) < 1e-18) continue;
 				// Positive UV winding follows dS/du x dS/dv, regardless of bound order.
-				if ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0) std::swap(p1, p2);
+				if (((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) < 0) != turned) std::swap(p1, p2);
 				geometry.AddFace(p0, p1, p2);
 			}
 			return true;

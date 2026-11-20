@@ -625,14 +625,138 @@ namespace webifc::geometry
 		// a profile point on the axis has no angle of its own: it takes its neighbour's
 		for (size_t i = 0; i < profile.size(); i++)
 			if (line->flat[i].x <= widest * 1e-9) (*angles)[i] = (*angles)[i > 0 ? i - 1 : 1];
-		const double last = static_cast<double>(profile.size() - 1);
+		// A profile that is a straight line or an arc of a circle is carried on past its ends as far as the
+		// face's bounds reach, never across the axis: files give only part of the profile of some faces
+		{
+			auto& flat = line->flat;
+			const size_t n = flat.size();
+			bool oneAngle = true;
+			for (double a : *angles) if (std::abs(a - angles->front()) > 1e-6) oneAngle = false;
+			const double reach = glm::distance(flat.front(), flat.back());
+			if (oneAngle && reach > widest * 1e-9)
+			{
+				const double phi = angles->front();
+				std::vector<glm::dvec2> seen;
+				for (auto const& bound : bounds)
+					for (auto const& pt : bound.curve.points)
+					{
+						const glm::dvec3 d = pt - origin;
+						seen.emplace_back(std::hypot(glm::dot(d, X), glm::dot(d, Y)), glm::dot(d, Z));
+					}
+				const glm::dvec2 along = (flat.back() - flat.front()) / reach;
+				double bend = 0;
+				for (auto const& pt : flat) { const glm::dvec2 d = pt - flat.front(); bend = std::max(bend, std::abs(d.x * along.y - d.y * along.x)); }
+				std::vector<glm::dvec2> before, after;
+				if (bend < reach * 1e-6)
+				{
+					// a straight line
+					double lo = 0, hi = reach;
+					for (auto const& q : seen)
+					{
+						const glm::dvec2 d = q - flat.front();
+						if (std::abs(d.x * along.y - d.y * along.x) > reach * 1e-3 + widest * 1e-4) continue;
+						lo = std::min(lo, glm::dot(d, along)); hi = std::max(hi, glm::dot(d, along));
+					}
+					// not across the axis
+					if (along.x > 0) lo = std::max(lo, -flat.front().x / along.x);
+					if (along.x < 0) hi = std::min(hi, -flat.front().x / along.x);
+					if (lo < -reach * 1e-6) before.push_back(flat.front() + along * lo);
+					if (hi > reach * (1 + 1e-6)) after.push_back(flat.front() + along * hi);
+				}
+				else if (n >= 3)
+				{
+					// an arc of a circle: its centre from the first, middle and last points
+					const glm::dvec2 a = flat.front(), b = flat[n / 2], c = flat.back();
+					const double det = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+					if (std::abs(det) > 1e-12 * reach * reach)
+					{
+						const glm::dvec2 centre((glm::dot(a, a) * (b.y - c.y) + glm::dot(b, b) * (c.y - a.y) + glm::dot(c, c) * (a.y - b.y)) / det,
+						                        (glm::dot(a, a) * (c.x - b.x) + glm::dot(b, b) * (a.x - c.x) + glm::dot(c, c) * (b.x - a.x)) / det);
+						const double radius = glm::distance(a, centre);
+						bool round = true;
+						for (auto const& pt : flat) if (std::abs(glm::distance(pt, centre) - radius) > radius * 2e-3) round = false;
+						const auto turnOf = [&](glm::dvec2 const& q) { return std::atan2(q.y - centre.y, q.x - centre.x); };
+						const auto toPi = [](double x) { while (x > CONST_PI) x -= 2 * CONST_PI; while (x < -CONST_PI) x += 2 * CONST_PI; return x; };
+						if (round)
+						{
+							const double start = turnOf(a);
+							const double way = toPi(turnOf(flat[1]) - start) >= 0 ? 1.0 : -1.0;
+							double sweep = 0;
+							for (size_t i = 1; i < n; i++) sweep += way * toPi(turnOf(flat[i]) - turnOf(flat[i - 1]));
+							const double step = sweep / static_cast<double>(n - 1);
+							if (sweep > 0 && step > 0)
+							{
+								double lo = 0, hi = sweep;
+								for (auto const& q : seen)
+								{
+									if (std::abs(glm::distance(q, centre) - radius) > radius * 0.02) continue;
+									const double at = sweep / 2 + way * toPi(turnOf(q) - (start + way * sweep / 2));
+									lo = std::min(lo, at); hi = std::max(hi, at);
+								}
+								const auto on = [&](double at) { return centre + radius * glm::dvec2(std::cos(start + way * at), std::sin(start + way * at)); };
+								// outwards from an end by the profile's own step, stopping on the axis
+								const auto carry = [&](double from, double to, std::vector<glm::dvec2>& out)
+								{
+									const double dir = to > from ? 1.0 : -1.0;
+									double at = from;
+									for (int guard = 0; guard < 4096 && dir * (to - at) > step * 0.25; guard++)
+									{
+										double next = at + dir * step;
+										if (dir * (next - to) > 0) next = to;
+										if (on(next).x < 0)
+										{
+											double in = at, outside = next;
+											for (int i = 0; i < 40; i++) { const double mid = (in + outside) / 2; if (on(mid).x < 0) outside = mid; else in = mid; }
+											glm::dvec2 tip = on(in); tip.x = 0;
+											out.push_back(tip);
+											return;
+										}
+										out.push_back(on(next));
+										at = next;
+									}
+								};
+								lo = std::max(lo, sweep - static_cast<double>(2 * CONST_PI) + step);
+								hi = std::min(hi, lo + static_cast<double>(2 * CONST_PI) - step);
+								if (flat.front().x > widest * 1e-9) carry(0, lo, before);
+								if (flat.back().x > widest * 1e-9) carry(sweep, hi, after);
+							}
+						}
+					}
+				}
+				if (!before.empty() || !after.empty())
+				{
+					std::reverse(before.begin(), before.end());
+					flat.insert(flat.begin(), before.begin(), before.end());
+					flat.insert(flat.end(), after.begin(), after.end());
+					angles->assign(flat.size(), phi);
+					for (auto const& pt : flat) widest = std::max(widest, pt.x);
+				}
+			}
+		}
+		const double last = static_cast<double>(line->flat.size() - 1);
 		TrimSurface s;
 		s.u0 = 0; s.u1 = 2 * CONST_PI; s.v0 = 0; s.v1 = last; s.wrapU = true;
-		const bool closed = glm::distance(profile.front(), profile.back()) < widest * 1e-9;
+		const bool closed = line->flat.size() > 2 && glm::distance(line->flat.front(), line->flat.back()) < widest * 1e-9;
 		s.wrapV = closed;
 		// meshed to the step its outline is drawn with
 		s.turnStep = RoundStep(widest * scaling);
 		s.stray = 1.5 * (1 - std::cos(s.turnStep / 2)) / (2 * std::sin(s.turnStep / 2));
+		// The allowance of a round thing as tight as the surface gets: its profile's tightest bend (corners
+		// apart), or its widest circle about the axis if that is tighter
+		{
+			double tightest = widest;
+			auto const& flat = line->flat;
+			for (size_t i = 1; i + 1 < flat.size(); i++)
+			{
+				const glm::dvec2 a = flat[i] - flat[i - 1], b = flat[i + 1] - flat[i];
+				const double la = glm::length(a), lb = glm::length(b);
+				if (la <= 0 || lb <= 0) continue;
+				const double turn = std::acos(glm::clamp(glm::dot(a, b) / (la * lb), -1.0, 1.0));
+				if (turn > 1e-3 && turn < 0.61) tightest = std::min(tightest, (la + lb) / 2 / turn);
+			}
+			s.allow = tightest * (1 - std::cos(RoundStep(tightest * scaling) / 2));
+			s.unit = 2 * tightest * std::sin(RoundStep(tightest * scaling) / 2);
+		}
 		auto curve = std::make_shared<TrimCurve<glm::dvec2>>();
 		curve->build(line->flat, closed);
 		s.point = [=](double u, double v)
