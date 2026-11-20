@@ -3690,7 +3690,7 @@ namespace webifc::geometry
         placement = GetAxis2Placement2D(placementID);
       }
 
-      profile.curve = GetCircleCurve(radius, _circleSegments, placement);
+      profile.curve = GetCircleCurve(radius, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement);
 
       return profile;
     }
@@ -3733,8 +3733,8 @@ namespace webifc::geometry
         placement = GetAxis2Placement2D(placementID);
       }
 
-      profile.curve = GetCircleCurve(radius, _circleSegments, placement);
-      profile.holes.push_back(GetCircleCurve(radius - thickness, _circleSegments, placement));
+      profile.curve = GetCircleCurve(radius, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement);
+      profile.holes.push_back(GetCircleCurve(radius - thickness, RoundRunSides() > 0 ? RoundRunSides() + 1 : _circleSegments, placement));
       std::reverse(profile.holes[0].points.begin(), profile.holes[0].points.end());
 
       return profile;

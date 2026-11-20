@@ -2075,7 +2075,11 @@ namespace webifc::geometry
         IfcFlatMesh flatMesh;
         flatMesh.expressID = expressID;
 
+        // A pipe, duct or conduit run is round with 18 sides whatever its size
+        const auto elementType = _loader.GetLineType(expressID);
+        RoundRunSides() = elementType == schema::IFCPIPESEGMENT || elementType == schema::IFCDUCTSEGMENT || elementType == schema::IFCCABLECARRIERSEGMENT || elementType == schema::IFCFLOWSEGMENT ? 18 : 0;
         IfcComposedMesh composedMesh = GetMesh(expressID);
+        RoundRunSides() = 0;
 
         glm::dmat4 mat = glm::dmat4(1);
         if (applyLinearScalingFactor)

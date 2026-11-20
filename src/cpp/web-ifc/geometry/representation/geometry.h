@@ -45,12 +45,23 @@ namespace webifc::geometry {
 		const double EXTRUSION_DISTANCE_HALFSPACE_M = 100;
 
 		enum IfcTrimmingSelectType { TRIM_NONE, TRIM_BY_POSITION, TRIM_BY_PARAMETER, TRIM_BY_LENGTH };
-		// How much of a turn one side of a round thing covers, by its radius in metres: 8 sides under 100 mm
-		// across, 12 under 300 mm, 20 above, and never further than 10 mm from the curve
+		// The sides every round thing of the element being meshed gets, whatever its size; 0 for sides by size.
+		// Set for pipe, duct and conduit runs.
+		inline int &RoundRunSides()
+		{
+			static int sides = 0;
+			return sides;
+		}
+
+		// How much of a turn one side of a round thing covers, by its radius in metres. Sides by diameter: under
+		// 10 mm 4, 25 mm 6, 39 mm 8, 60 mm 10, 150 mm 12, 300 mm 18, above that 20 per 300 mm (at most 96); and
+		// never further than 10 mm from the curve. The table the .frag exporter uses in Revit.
 		inline double RoundStep(double radiusMetres)
 		{
-			const double across = 2 * radiusMetres;
-			double step = 6.283185307179586 / (across < 0.1 ? 8.0 : (across < 0.3 ? 12.0 : 20.0));
+			const double mm = 2000 * radiusMetres;
+			double sides = mm < 10 ? 4 : mm < 25 ? 6 : mm < 39 ? 8 : mm < 60 ? 10 : mm < 150 ? 12 : mm < 300 ? 18 : std::min(96.0, std::max(20.0, std::round(20 * mm / 300)));
+			if (RoundRunSides() > 0) sides = RoundRunSides();
+			double step = 6.283185307179586 / sides;
 			if (radiusMetres > 0.010) step = std::min(step, 2 * std::acos(1 - 0.010 / radiusMetres));
 			return step;
 		}
