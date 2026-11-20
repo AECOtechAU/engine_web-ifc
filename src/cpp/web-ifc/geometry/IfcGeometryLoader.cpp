@@ -1502,6 +1502,21 @@ namespace webifc::geometry
       
       ComputeCurve(CurveRef, curve, edgeParams);
 
+      // The ends of the edge are its vertices themselves, so that edges meet exactly
+      if (curve.points.size() >= 2)
+      {
+        double length = 0;
+        for (size_t i = 1; i < curve.points.size(); i++) length += glm::distance(curve.points[i - 1], curve.points[i]);
+        const double near = length * 0.02;
+        glm::dvec3 &front = curve.points.front();
+        glm::dvec3 &back = curve.points.back();
+        const bool forwards = glm::distance(front, p1) + glm::distance(back, p2) <= glm::distance(front, p2) + glm::distance(back, p1);
+        const glm::dvec3 &atFront = forwards ? p1 : p2;
+        const glm::dvec3 &atBack = forwards ? p2 : p1;
+        if (glm::distance(front, atFront) < near) front = atFront;
+        if (glm::distance(back, atBack) < near) back = atBack;
+      }
+
       return curve;
     }
     default:

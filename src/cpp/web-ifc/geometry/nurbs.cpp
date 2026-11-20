@@ -116,9 +116,12 @@ namespace webifc::geometry{
 			std::vector<Loop> loops;
 			for (auto const& bound : this->bounds)
 			{
-				auto const& pts = bound.curve.points;
+				// a corner given by both edges that meet there is one point
+				std::vector<glm::dvec3> pts;
+				pts.reserve(bound.curve.points.size());
+				for (auto const& pt : bound.curve.points) if (pts.empty() || glm::distance(pts.back(), pt) > close * 1e-2) pts.push_back(pt);
 				size_t n = pts.size();
-				while (n > 1 && glm::distance(pts[n - 1], pts[0]) < close * 1e-3) n--;
+				while (n > 1 && glm::distance(pts[n - 1], pts[0]) <= close * 1e-2) n--;
 				if (n < 3) { if (&bound == &this->bounds.front()) return false; continue; }
 				size_t start = 0; double mostInterior = -1;
 				std::vector<uv_point_t> seeds(n);
