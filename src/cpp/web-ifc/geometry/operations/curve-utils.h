@@ -110,32 +110,34 @@ inline IfcCurve Build3DArc3Pt(const glm::dvec3 &p1, const glm::dvec3 &p2, const 
 
 		double radius = sqrt(pow(cenX - p1.x, 2) + pow(cenY - p1.y, 2));
 
-			// Using geometrical subdivision to avoid complex calculus with angles
-
-		std::vector<glm::dvec2> pointList;
-		pointList.push_back(p1);
-		pointList.push_back(p2);
-		pointList.push_back(p3);
-
-		while (pointList.size() < (size_t)circleSegments)
-		{
-			std::vector<glm::dvec2> tempPointList;
-			for (uint32_t j = 0; j < pointList.size() - 1; j++)
-			{
-				glm::dvec2 pt = (pointList[j] + pointList[j + 1]);
-				pt.x /= 2;
-				pt.y /= 2;
-				glm::dvec2 vc = glm::normalize(pt - pCen);
-				pt = pCen + vc * radius;
-				tempPointList.push_back(pointList[j]);
-				tempPointList.push_back(pt);
-			}
-			tempPointList.push_back(pointList[pointList.size() - 1]);
-			pointList = tempPointList;
-		}
 		IfcCurve curve;
-		for (uint32_t j = 0; j < pointList.size(); j++) curve.Add(pointList.at(j));
+		if (!std::isfinite(cenX) || !std::isfinite(cenY) || !std::isfinite(radius) || radius <= 0)
+		{
+			curve.Add(p1); curve.Add(p2); curve.Add(p3);
 			return curve;
+		}
+
+		// Even steps round the arc from p1 through p2 to p3, in exactly the pieces asked for (the halving this
+		// replaces could only give 2, 4, 8 or 16 pieces, so a round column drawn as two half circles and asked
+		// for 20 sides came out with 32)
+		const double start = std::atan2(p1.y - cenY, p1.x - cenX);
+		auto turnTo = [&](const glm::dvec2 &p) {
+			double t = std::atan2(p.y - cenY, p.x - cenX) - start;
+			while (t < 0) t += 6.283185307179586;
+			return t;
+		};
+		const double mid = turnTo(p2);
+		double sweep = turnTo(p3);
+		if (sweep < mid) sweep -= 6.283185307179586; // p2 lies the other way round
+		const int pieces = std::max(2, static_cast<int>(circleSegments) - 1);
+		curve.Add(p1);
+		for (int j = 1; j < pieces; j++)
+		{
+			const double t = start + sweep * j / pieces;
+			curve.Add(glm::dvec2(cenX + radius * std::cos(t), cenY + radius * std::sin(t)));
+		}
+		curve.Add(p3);
+		return curve;
 	}
 
 
