@@ -28,6 +28,7 @@
 #include "operations/mesh_utils.h"
 #include "operations/boolean-utils/fuzzy-bools.h"
 #include "operations/plane-clip.h"
+#include "operations/small-openings.h"
 
 namespace webifc::geometry
 {
@@ -298,8 +299,11 @@ namespace webifc::geometry
 
                     IfcComposedMesh voidGeom = GetMesh(relVoidExpressID);
                     auto flatVoidMesh = flatten(voidGeom, _expressIDToGeometry, normalizeMat);
+                    // a small opening (a bolt hole, a narrow slot) is not cut: the face it would open stays whole
+                    if (IsSmallCutout(flatVoidMesh, _cache.GetLinearScalingFactor())) continue;
                     voidGeoms.insert(voidGeoms.end(), flatVoidMesh.begin(), flatVoidMesh.end());
                 }
+                if (voidGeoms.empty()) return mesh;
 
                 if (relVoidsIt->second.size() > _settings._BOOLEAN_UNION_THRESHOLD) // When voids are greater than 10 they are all fused
                 {
@@ -999,10 +1003,29 @@ namespace webifc::geometry
 
                 IfcGeometry geom;
 
-                std::vector<IfcBound3D> bounds;
-                for (auto &face : faces)
+                // Small openings in its faces are filled, and what sat in or behind them is left out
+                bool anyOpening = false;
+                if (FillSmallOpeningsOn())
                 {
-                    uint32_t faceID = _loader.GetRefArgument(face);
+                    for (size_t i = 0; i < faces.size() && !anyOpening; i++)
+                        anyOpening = _loader.GetLineType(_loader.GetRefArgument(faces[i])) == schema::IFCINDEXEDPOLYGONALFACEWITHVOIDS;
+                }
+                if (anyOpening)
+                {
+                    std::vector<ShellFace> shell(faces.size());
+                    for (size_t i = 0; i < faces.size(); i++)
+                    {
+                        ReadIndexedPolygonalFace(_loader.GetRefArgument(faces[i]), shell[i].bounds, points);
+                        shell[i].planar = true;
+                    }
+                    FillSmallOpenings(shell, _cache.GetLinearScalingFactor());
+                    for (auto &face : shell)
+                        if (!face.dropped) TriangulateBounds(geom, face.bounds, expressID);
+                }
+                std::vector<IfcBound3D> bounds;
+                for (size_t i = 0; i < faces.size() && !anyOpening; i++)
+                {
+                    uint32_t faceID = _loader.GetRefArgument(faces[i]);
                     ReadIndexedPolygonalFace(faceID, bounds, points);
 
                     TriangulateBounds(geom, bounds, expressID);
@@ -2459,6 +2482,66 @@ namespace webifc::geometry
                     return geometry;
                 }
             }
+            // Small openings in flat faces are filled, and what sat in or behind them is left out. Only shells
+            // with an opening in some face are read this way.
+            bool anyOpening = false;
+            if (FillSmallOpeningsOn())
+            {
+                for (size_t i = 0; i < faces.size() && !anyOpening; i++)
+                {
+                    const uint32_t faceID = _loader.GetRefArgument(faces[i]);
+                    _loader.MoveToArgumentOffset(faceID, 0);
+                    anyOpening = _loader.GetSetArgument().size() > 1;
+                }
+            }
+            if (anyOpening)
+            {
+                std::vector<uint32_t> faceIDs(faces.size());
+                std::vector<ShellFace> shell(faces.size());
+                for (size_t i = 0; i < faces.size(); i++)
+                {
+                    const uint32_t faceID = faceIDs[i] = _loader.GetRefArgument(faces[i]);
+                    const auto faceType = _loader.GetLineType(faceID);
+                    if (faceType != schema::IFCFACE && faceType != schema::IFCFACESURFACE && faceType != schema::IFCADVANCEDFACE) continue;
+                    _loader.MoveToArgumentOffset(faceID, 0);
+                    auto boundTokens = _loader.GetSetArgument();
+                    shell[i].bounds.resize(boundTokens.size());
+                    for (size_t b = 0; b < boundTokens.size(); b++)
+                        shell[i].bounds[b] = _geometryLoader.GetBound(_loader.GetRefArgument(boundTokens[b]));
+                    if (faceType == schema::IFCFACE)
+                    {
+                        shell[i].planar = true;
+                        continue;
+                    }
+                    _loader.MoveToArgumentOffset(faceID, 1);
+                    const uint32_t surfaceID = _loader.GetRefArgument();
+                    _loader.MoveToArgumentOffset(faceID, 2);
+                    const bool sameSense = _loader.GetStringArgument() == "T";
+                    const auto kind = _loader.GetLineType(surfaceID);
+                    if (kind == schema::IFCPLANE)
+                    {
+                        const auto surface = GetSurface(surfaceID);
+                        shell[i].planar = true;
+                        shell[i].normal = glm::dvec3(surface.transformation[2]) * (sameSense ? 1.0 : -1.0);
+                    }
+                    else if (kind == schema::IFCCYLINDRICALSURFACE)
+                    {
+                        const auto surface = GetSurface(surfaceID);
+                        shell[i].round = true;
+                        shell[i].concave = !sameSense;
+                        shell[i].axis = glm::normalize(glm::dvec3(surface.transformation[2]));
+                        shell[i].axisOrigin = glm::dvec3(surface.transformation[3]);
+                    }
+                }
+                FillSmallOpenings(shell, _cache.GetLinearScalingFactor());
+                for (size_t i = 0; i < faces.size(); i++)
+                {
+                    if (shell[i].dropped) continue;
+                    if (shell[i].bounds.empty()) AddFaceToGeometry(faceIDs[i], geometry);
+                    else AddFaceToGeometry(faceIDs[i], geometry, &shell[i].bounds);
+                }
+                return geometry;
+            }
             for (auto &faceToken : faces)
             {
                 uint32_t faceID = _loader.GetRefArgument(faceToken);
@@ -2475,7 +2558,7 @@ namespace webifc::geometry
         return IfcGeometry();
     }
 
-    void IfcGeometryProcessor::AddFaceToGeometry(uint32_t expressID, IfcGeometry &geometry)
+    void IfcGeometryProcessor::AddFaceToGeometry(uint32_t expressID, IfcGeometry &geometry, std::vector<IfcBound3D> *readBounds)
     {
         spdlog::debug("[AddFaceToGeometry({})]", expressID);
         auto lineType = _loader.GetLineType(expressID);
@@ -2487,13 +2570,14 @@ namespace webifc::geometry
             _loader.MoveToArgumentOffset(expressID, 0);
             auto bounds = _loader.GetSetArgument();
 
-            std::vector<IfcBound3D> bounds3D(bounds.size());
+            std::vector<IfcBound3D> bounds3D(readBounds ? 0 : bounds.size());
 
-            for (size_t i = 0; i < bounds.size(); i++)
+            for (size_t i = 0; i < bounds.size() && !readBounds; i++)
             {
                 uint32_t boundID = _loader.GetRefArgument(bounds[i]);
                 bounds3D[i] = _geometryLoader.GetBound(boundID);
             }
+            if (readBounds) bounds3D = std::move(*readBounds);
 
             TriangulateBounds(geometry, bounds3D, expressID);
             break;
@@ -2504,13 +2588,14 @@ namespace webifc::geometry
             _loader.MoveToArgumentOffset(expressID, 0);
             auto bounds = _loader.GetSetArgument();
 
-            std::vector<IfcBound3D> bounds3D(bounds.size());
+            std::vector<IfcBound3D> bounds3D(readBounds ? 0 : bounds.size());
 
-            for (size_t i = 0; i < bounds.size(); i++)
+            for (size_t i = 0; i < bounds.size() && !readBounds; i++)
             {
                 uint32_t boundID = _loader.GetRefArgument(bounds[i]);
                 bounds3D[i] = _geometryLoader.GetBound(boundID);
             }
+            if (readBounds) bounds3D = std::move(*readBounds);
 
             _loader.MoveToArgumentOffset(expressID, 1);
             auto surfRef = _loader.GetRefArgument();

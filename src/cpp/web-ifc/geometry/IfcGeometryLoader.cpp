@@ -7,6 +7,7 @@
 #include "IfcGeometryLoader.h"
 #include "operations/curve-utils.h"
 #include "operations/geometryutils.h"
+#include "operations/small-openings.h"
 #ifdef DEBUG_DUMP_SVG
 #include "../../test/io_helpers.h"
 #include "../../test/dumpToThree.h"
@@ -3601,6 +3602,7 @@ namespace webifc::geometry
         IfcCurve holeCurve = GetCurve(_loader.GetRefArgument(hole), 3);
         profile.holes.push_back(holeCurve);
       }
+      DropSmallHoles(profile, _cache.GetLinearScalingFactor());
 
       return profile;
     }
@@ -3667,6 +3669,7 @@ namespace webifc::geometry
       profile.holes.push_back(GetRectangleCurve(xdim - 2 * thickness, ydim - 2 * thickness, placement, _circleSegments, innerRadius));
 
       std::reverse(profile.holes[0].points.begin(), profile.holes[0].points.end());
+      DropSmallHoles(profile, _cache.GetLinearScalingFactor());
 
       return profile;
     }
@@ -3735,6 +3738,7 @@ namespace webifc::geometry
       profile.curve = GetCircleCurve(radius, RoundSides(radius * _cache.GetLinearScalingFactor()) + 1, placement);
       profile.holes.push_back(GetCircleCurve(radius - thickness, RoundSides(radius * _cache.GetLinearScalingFactor()) + 1, placement));
       std::reverse(profile.holes[0].points.begin(), profile.holes[0].points.end());
+      DropSmallHoles(profile, _cache.GetLinearScalingFactor());
 
       return profile;
     }

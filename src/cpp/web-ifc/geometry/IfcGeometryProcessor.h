@@ -80,7 +80,7 @@ namespace webifc::geometry
     IfcGeometryProcessor(const IfcGeometrySettings &settings, std::unordered_map<uint32_t, IfcGeometry> expressIDToGeometry, glm::dmat4 transformation, const parsing::IfcLoader &loader, booleanManager boolEngine, const schema::IfcSchemaManager &schemaManager, bool isCoordinated, uint32_t expressIdCyl, uint32_t expressIdRect, glm::dmat4 coordinationMatrix, IfcGeometry predefinedCylinder, IfcGeometry predefinedCube);
     IfcGeometrySettings _settings;
     std::optional<glm::dvec4> GetStyleItemFromExpressId(uint32_t expressID);
-    void AddFaceToGeometry(uint32_t expressID, IfcGeometry &geometry);
+    void AddFaceToGeometry(uint32_t expressID, IfcGeometry &geometry, std::vector<IfcBound3D> *readBounds = nullptr);
     IfcGeometry GetBrep(uint32_t expressID);
     IfcGeometry BoolProcess(const std::vector<IfcGeometry> &firstGroups, std::vector<IfcGeometry> &secondGroups, std::string op, IfcGeometrySettings _settings);
     std::unordered_map<uint32_t, IfcGeometry> _expressIDToGeometry;
