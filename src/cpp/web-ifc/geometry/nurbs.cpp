@@ -174,6 +174,58 @@ namespace webifc::geometry{
 				const uv_point_t back = follow(pts[start], previous, seeds[start], left);
 				if (s.wrapU) loop.roundU = static_cast<int>(std::round((back.x - loop.uv[0].x) / periodU));
 				if (s.wrapV) loop.roundV = static_cast<int>(std::round((back.y - loop.uv[0].y) / periodV));
+				// a jump across both parameters whose corner is a pole of the surface goes through that corner
+				for (size_t k = 0; k < loop.uv.size(); k++)
+				{
+					const size_t next = (k + 1) % loop.uv.size();
+					uv_point_t a = loop.uv[k], b = loop.uv[next];
+					if (next == 0) { b.x += loop.roundU * periodU; b.y += loop.roundV * periodV; }
+					if (std::abs(a.x - b.x) < periodU * 0.02 || std::abs(a.y - b.y) < periodV * 0.02) continue;
+					if (glm::distance(loop.at[k], loop.at[next]) < close * 100) continue;
+					for (int which = 0; which < 2; which++)
+					{
+						const uv_point_t corner = which == 0 ? uv_point_t{ a.x, b.y } : uv_point_t{ b.x, a.y };
+						const uv_point_t in = s.wrapped(corner);
+						const glm::dvec3 at = s.point(in.x, in.y);
+						const bool isA = glm::distance(at, loop.at[k]) < close * 10, isB = glm::distance(at, loop.at[next]) < close * 10;
+						if (!isA && !isB) continue;
+						// the way from a to the corner and on to b, with points where the surface turns
+						std::vector<uv_point_t> pathUV; std::vector<glm::dvec3> pathAt;
+						const glm::dvec3 atCorner = isA ? loop.at[k] : loop.at[next];
+						const auto leg = [&](uv_point_t const& from, uv_point_t const& to, glm::dvec3 const& atFrom, glm::dvec3 const& atTo)
+						{
+							if (glm::distance(atFrom, atTo) < close * 10) return;
+							const bool alongU = std::abs(from.x - to.x) > std::abs(from.y - to.y);
+							const double start = alongU ? from.x : from.y, end = alongU ? to.x : to.y;
+							std::vector<double> stops;
+							if (s.creased == (alongU ? 0 : 1))
+							{
+								if (end > start) for (double c = std::floor(start) + 1; c < end - 1e-9; c += 1) stops.push_back(c);
+								else for (double c = std::ceil(start) - 1; c > end + 1e-9; c -= 1) stops.push_back(c);
+							}
+							else
+							{
+								const int pieces = std::max(1, static_cast<int>(std::ceil(std::abs(end - start) / ((alongU ? periodU : periodV) / 16))));
+								for (int piece = 1; piece < pieces; piece++) stops.push_back(start + (end - start) * piece / pieces);
+							}
+							for (double stop : stops)
+							{
+								const uv_point_t q = alongU ? uv_point_t{ stop, from.y } : uv_point_t{ from.x, stop };
+								const uv_point_t inside = s.wrapped(q);
+								pathUV.push_back(q); pathAt.push_back(s.point(inside.x, inside.y));
+							}
+						};
+						const glm::dvec3 atA = loop.at[k], atB = loop.at[next];
+						leg(a, corner, atA, atCorner);
+						pathUV.push_back(corner); pathAt.push_back(atCorner);
+						leg(corner, b, atCorner, atB);
+						loop.uv.insert(loop.uv.begin() + k + 1, pathUV.begin(), pathUV.end());
+						loop.at.insert(loop.at.begin() + k + 1, pathAt.begin(), pathAt.end());
+						k += pathUV.size() - 1;
+						k++;
+						break;
+					}
+				}
 				loops.push_back(std::move(loop));
 			}
 			if (loops.empty()) return false;
