@@ -2381,14 +2381,16 @@ namespace webifc::geometry
             IfcGeometry faceGeometry;
 
             // TODO: place the face in the surface and tringulate
+            // The outer bound runs anticlockwise about the face's normal, which is the surface's when SameSense
+            const int outerTurn = bounds3D.empty() || !bounds3D.front().curve.directed ? 0 : (sameSense ? 1 : -1);
 
             if (surface.BSplineSurface.Active)
             {
-                TriangulateBspline(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor());
+                TriangulateBspline(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor(), outerTurn);
             }
             else if (surface.CylinderSurface.Active)
             {
-                if (!TriangulateTrimmedCylinder(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                if (!TriangulateTrimmedCylinder(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor(), outerTurn))
                 {
                     faceGeometry = IfcGeometry();
                     TriangulateCylindricalSurface(faceGeometry, bounds3D, surface, _settings._circleSegments);
@@ -2396,7 +2398,7 @@ namespace webifc::geometry
             }
             else if (surface.RevolutionSurface.Active)
             {
-                if (!TriangulateTrimmedRevolution(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                if (!TriangulateTrimmedRevolution(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor(), outerTurn))
                 {
                     faceGeometry = IfcGeometry();
                     TriangulateRevolution(faceGeometry, bounds3D, surface, _settings._circleSegments);
@@ -2404,7 +2406,7 @@ namespace webifc::geometry
             }
             else if (surface.ExtrusionSurface.Active)
             {
-                if (!TriangulateTrimmedExtrusion(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor()))
+                if (!TriangulateTrimmedExtrusion(faceGeometry, bounds3D, surface, _cache.GetLinearScalingFactor(), outerTurn))
                 {
                     faceGeometry = IfcGeometry();
                     TriangulateExtrusion(faceGeometry, bounds3D, surface);

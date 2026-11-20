@@ -125,6 +125,19 @@ namespace webifc::geometry{
 			}
 			const double periodU = u1 - u0, periodV = v1 - v0;
 
+			// Where a surface closed round its first parameter comes to a point at an end of the second (a pole)
+			bool poleLow = false, poleHigh = false;
+			const glm::dvec3 tipLow = grid[0], tipHigh = grid[G];
+			if (s.wrapU)
+			{
+				poleLow = poleHigh = true;
+				for (int k = 1; k <= G; k++)
+				{
+					if (glm::distance(grid[k * (G + 1)], tipLow) > close * 10) poleLow = false;
+					if (glm::distance(grid[k * (G + 1) + G], tipHigh) > close * 10) poleHigh = false;
+				}
+			}
+
 			// Each bound followed round in the parameter plane, from where it is least in doubt
 			struct Loop { std::vector<uv_point_t> uv; std::vector<glm::dvec3> at; int roundU = 0; int roundV = 0; };
 			std::vector<Loop> loops;
@@ -159,6 +172,88 @@ namespace webifc::geometry{
 					}
 					return uv;
 				};
+				// A bound through two poles of the surface (the outline of a slice of a ball): at a pole the turn
+				// about the axis is free, so each run between poles is followed on its own, and the runs are set
+				// side by side the way the bound's direction asks
+				if (s.wrapU && (poleLow || poleHigh))
+				{
+					std::vector<int> atPole(n, 0);
+					for (size_t i = 0; i < n; i++)
+					{
+						if (poleLow && glm::distance(pts[i], tipLow) < close * 10) atPole[i] = 1;
+						else if (poleHigh && glm::distance(pts[i], tipHigh) < close * 10) atPole[i] = 2;
+					}
+					size_t poleRuns = 0, first = n;
+					for (size_t i = 0; i < n; i++)
+						if (atPole[i] && !atPole[(i + n - 1) % n]) { poleRuns++; if (first == n) first = i; }
+					if (poleRuns >= 2)
+					{
+						struct Run { std::vector<uv_point_t> uv; std::vector<glm::dvec3> at; int before = 0, after = 0; };
+						std::vector<Run> runs;
+						int lastPole = 0;
+						for (size_t k = 0; k < n;)
+						{
+							const size_t i = (first + k) % n;
+							if (atPole[i]) { lastPole = atPole[i]; k++; continue; }
+							Run run; run.before = lastPole;
+							uv_point_t previous = s.direct ? (runs.empty() ? seeds[0] : runs.back().uv.back()) : seeds[i];
+							for (; k < n && !atPole[(first + k) % n]; k++)
+							{
+								const size_t j = (first + k) % n;
+								double left = 0;
+								const uv_point_t uv = follow(pts[j], previous, s.direct ? previous : seeds[j], left);
+								if (left > lost) return false;
+								run.uv.push_back(uv); run.at.push_back(pts[j]); previous = uv;
+							}
+							run.after = atPole[(first + k) % n];
+							runs.push_back(std::move(run));
+						}
+						if (runs.size() < 2 || runs.size() > 4) return false;
+						const int want = s.outerTurn * (&bound == &bounds.front() ? 1 : -1);
+						const auto poleAt = [&](int which) { return which == 1 ? v0 : v1; };
+						const auto build = [&](std::vector<int> const& turns, Loop& made)
+						{
+							made.uv.clear(); made.at.clear();
+							for (size_t r = 0; r < runs.size(); r++)
+							{
+								const double by = turns[r] * periodU;
+								made.uv.push_back({ runs[r].uv.front().x + by, poleAt(runs[r].before) }); made.at.push_back(runs[r].before == 1 ? tipLow : tipHigh);
+								for (size_t q = 0; q < runs[r].uv.size(); q++) { made.uv.push_back({ runs[r].uv[q].x + by, runs[r].uv[q].y }); made.at.push_back(runs[r].at[q]); }
+								made.uv.push_back({ runs[r].uv.back().x + by, poleAt(runs[r].after) }); made.at.push_back(runs[r].after == 1 ? tipLow : tipHigh);
+							}
+							double area = 0, along = 0;
+							for (size_t q = 0; q < made.uv.size(); q++)
+							{
+								const uv_point_t& a = made.uv[q]; const uv_point_t& b = made.uv[(q + 1) % made.uv.size()];
+								area += a.x * b.y - b.x * a.y;
+								if (glm::distance(made.at[q], made.at[(q + 1) % made.uv.size()]) < close * 20) along += std::abs(a.x - b.x);
+							}
+							return std::pair<double, double>(area / 2, along);
+						};
+						// every way of setting the runs within a turn of one another
+						std::vector<int> turns(runs.size(), 0), bestTurns;
+						double bestAlong = std::numeric_limits<double>::max(), otherAlong = bestAlong; int bestSign = 0, otherSign = 0;
+						Loop made;
+						size_t combos = 1; for (size_t r = 1; r < runs.size(); r++) combos *= 3;
+						for (size_t c = 0; c < combos; c++)
+						{
+							size_t rest = c;
+							for (size_t r = 1; r < runs.size(); r++) { turns[r] = static_cast<int>(rest % 3) - 1; rest /= 3; }
+							const auto [area, along] = build(turns, made);
+							const int sign = area > 0 ? 1 : (area < 0 ? -1 : 0);
+							if (sign == 0 || (want != 0 && sign != want)) continue;
+							if (along < bestAlong - periodU * 1e-6) { otherAlong = bestAlong; otherSign = bestSign; bestAlong = along; bestSign = sign; bestTurns = turns; }
+							else if (along < otherAlong) { otherAlong = along; otherSign = sign; }
+						}
+						if (bestTurns.empty()) return false;
+						// without a direction, two equally short layouts on opposite sides cannot be told apart
+						if (want == 0 && otherSign != 0 && otherSign != bestSign && otherAlong - bestAlong < periodU * 1e-3) return false;
+						Loop loop;
+						build(bestTurns, loop);
+						loops.push_back(std::move(loop));
+						continue;
+					}
+				}
 				Loop loop; loop.uv.resize(n); loop.at.resize(n);
 				uv_point_t previous = seeds[start];
 				for (size_t k = 0; k < n; k++)
@@ -525,6 +620,7 @@ namespace webifc::geometry{
 		TrimSurface s;
 		s.u0 = range_knots_u.x; s.u1 = range_knots_u.y; s.v0 = range_knots_v.x; s.v1 = range_knots_v.y;
 		s.findWraps = true;
+		s.outerTurn = this->outerTurn;
 		s.turnStep = TRIM_FREEFORM_TURN_STEP;
 		s.stray = TRIM_FREEFORM_STRAY;
 		s.point = [this](double u, double v) { return glm::dvec3(tinynurbs::surfacePoint(*this->nurbs, u, v)); };

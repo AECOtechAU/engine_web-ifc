@@ -38,6 +38,9 @@ namespace webifc::geometry{
 		bool even = false;
 		// The surface is creased wherever this parameter (0: the first, 1: the second) is a whole number
 		int creased = -1;
+		// The way the outer bound runs in the parameter plane, where the file says: +1 anticlockwise (the face
+		// looks the way the surface does), -1 clockwise, 0 not known
+		int outerTurn = 0;
 		// How far apart two neighbouring directions of the surface may be before another row of points goes in
 		double turnStep = 0.35;
 		// An inner edge may stray from the surface by this share of its length before it is split
@@ -61,6 +64,7 @@ namespace webifc::geometry{
 
 		void fill_geometry();
 		explicit Nurbs(IfcGeometry& geometry, std::vector<IfcBound3D>const & bounds, IfcSurface const& surface, double const scaling);
+		int outerTurn = 0;
 
 		private:
 

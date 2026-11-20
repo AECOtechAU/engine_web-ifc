@@ -18,6 +18,8 @@ namespace webifc::geometry {
 		std::vector<uint32_t> arcSegments;
 		std::vector<std::string> userData;
 		std::vector<uint16_t> indices;
+		// For the loop of a face bound: the points run the way the file directs the bound
+		bool directed = false;
 		glm::dvec3 endTangent = glm::dvec3(0,0,0);
 		// Stores the precise analytic tangent for the start of each segment, in case of IfcCurveSegment
 		std::vector<glm::dvec3> segmentStartTangents;

@@ -1331,10 +1331,12 @@ namespace webifc::geometry
       auto edges = _loader.GetSetArgument();
       int id = 0;
 
+      std::vector<glm::dvec3> firstEdge;
       for (auto &token : edges)
       {
         uint32_t edgeId = _loader.GetRefArgument(token);
         IfcCurve edgeCurve = GetOrientedEdge(edgeId);
+        if (id == 0) firstEdge = edgeCurve.points;
 
         // Important not to repeat the last point otherwise triangulation fails
         // if the list has zero points this is initial, no repetition is possible, otherwise we must check
@@ -1407,6 +1409,45 @@ namespace webifc::geometry
 
 #endif
 
+      }
+
+      // The way the file directs the loop: along its first edge, from the end that edge is entered at.
+      // Joining the edges above may have turned the points round.
+      if (!edges.empty() && curve.points.size() >= 3 && firstEdge.size() >= 2)
+      {
+        const uint32_t orientedId = _loader.GetRefArgument(edges[0]);
+        _loader.MoveToArgumentOffset(orientedId, 3);
+        const bool along = _loader.GetStringArgument() == "T";
+        _loader.MoveToArgumentOffset(orientedId, 2);
+        const uint32_t edgeId = _loader.GetRefArgument();
+        if (_loader.GetLineType(edgeId) == schema::IFCEDGECURVE)
+        {
+          _loader.MoveToArgumentOffset(edgeId, 0);
+          const glm::dvec3 start = GetVertexPoint(_loader.GetRefArgument());
+          _loader.MoveToArgumentOffset(edgeId, 1);
+          const glm::dvec3 end = GetVertexPoint(_loader.GetRefArgument());
+          const glm::dvec3 from = along ? start : end, to = along ? end : start;
+          if (glm::distance(from, to) > EPS_BIG)
+          {
+            const glm::dvec3 next = firstEdge.size() >= 3 ? firstEdge[firstEdge.size() / 2] : to;
+            const auto nearest = [&](const glm::dvec3 &p)
+            {
+              size_t best = 0; double least = std::numeric_limits<double>::max();
+              for (size_t i = 0; i < curve.points.size(); i++) { const double d = glm::distance(curve.points[i], p); if (d < least) { least = d; best = i; } }
+              return best;
+            };
+            const size_t count = curve.points.size(), i0 = nearest(from), i1 = nearest(next);
+            if (i0 != i1)
+            {
+              if ((i1 + count - i0) % count > count / 2)
+              {
+                std::reverse(curve.points.begin(), curve.points.end());
+                std::reverse(curve.indices.begin(), curve.indices.end());
+              }
+              curve.directed = true;
+            }
+          }
+        }
       }
 
       return curve;

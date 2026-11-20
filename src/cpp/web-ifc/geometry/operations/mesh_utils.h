@@ -501,7 +501,7 @@ namespace webifc::geometry
 	};
 
 	// S(u, v) = centre + radius * (cos u * X + sin u * Y) + v * Z
-	inline bool TriangulateTrimmedCylinder(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	inline bool TriangulateTrimmedCylinder(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{
 		const glm::dvec3 centre = surface.transformation[3];
 		const glm::dvec3 X = glm::normalize(glm::dvec3(surface.transformation[0])), Y = glm::normalize(glm::dvec3(surface.transformation[1])), Z = glm::normalize(glm::dvec3(surface.transformation[2]));
@@ -524,12 +524,13 @@ namespace webifc::geometry
 			return std::abs(r - radius);
 		};
 		s.direct = true;
+		s.outerTurn = outerTurn;
 		s.even = true;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
 	// S(u, v) = the profile point at v turned by u about the axis
-	inline bool TriangulateTrimmedRevolution(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	inline bool TriangulateTrimmedRevolution(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{
 		auto const& given = surface.RevolutionSurface.Profile.curve.points;
 		if (given.size() < 2 || surface.RevolutionSurface.Profile.isComposite) return false;
@@ -584,12 +585,13 @@ namespace webifc::geometry
 			return left;
 		};
 		s.direct = true;
+		s.outerTurn = outerTurn;
 		s.creased = 1;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
 	// S(u, v) = the profile point at u, moved v along the direction
-	inline bool TriangulateTrimmedExtrusion(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling)
+	inline bool TriangulateTrimmedExtrusion(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{
 		auto const& extrusion = surface.ExtrusionSurface;
 		if (extrusion.Profile.isComposite || glm::length(extrusion.Direction) == 0) return false;
@@ -637,15 +639,17 @@ namespace webifc::geometry
 			return left;
 		};
 		s.direct = true;
+		s.outerTurn = outerTurn;
 		s.creased = 0;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
 	// TODO: sent to bimGeometry
-    inline void TriangulateBspline(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double const scaling)
+    inline void TriangulateBspline(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double const scaling, int outerTurn = 0)
 	{
 		spdlog::debug("[TriangulateBspline({})]");
 		Nurbs nurbs{geometry, bounds, surface, scaling};
+		nurbs.outerTurn = outerTurn;
 		nurbs.fill_geometry();
 	}
 }
