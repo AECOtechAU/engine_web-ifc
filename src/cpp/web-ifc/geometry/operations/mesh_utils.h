@@ -500,6 +500,50 @@ namespace webifc::geometry
 		}
 	};
 
+	// A smooth curve through a run of points, its parameter counting the points as TrimPolyline's does. Where the
+	// run turns by more than 35 degrees at a point the curve has a corner there.
+	template <typename T> struct TrimCurve
+	{
+		std::vector<T> points, arriving, leaving;
+		void build(std::vector<T> const& run, bool closed)
+		{
+			points = run;
+			const size_t n = points.size();
+			arriving.assign(n, T(0)); leaving.assign(n, T(0));
+			const auto unit = [](T const& v) { const double l = glm::length(v); return l > 0 ? v / l : v; };
+			const size_t last = n - 1;
+			for (size_t i = 0; i < n; i++)
+			{
+				const bool hasBefore = i > 0 || closed, hasAfter = i < last || closed;
+				const T before = hasBefore ? points[i] - points[i > 0 ? i - 1 : last - 1] : T(0);
+				const T after = hasAfter ? points[i < last ? i + 1 : 1] - points[i] : T(0);
+				const double lb = glm::length(before), la = glm::length(after);
+				if (lb > 0 && la > 0)
+				{
+					const T b = before / lb, a = after / la;
+					if (glm::dot(a, b) < 0.819) { arriving[i] = b; leaving[i] = a; }
+					else arriving[i] = leaving[i] = unit(b * la + a * lb);
+				}
+				else arriving[i] = leaving[i] = lb > 0 ? before / lb : (la > 0 ? after / la : T(0));
+			}
+			if (!closed && n >= 3)
+			{
+				// at an open end the curve keeps the bend it has at the next point
+				leaving[0] = arriving[0] = unit(unit(points[1] - points[0]) * 2.0 - arriving[1]);
+				arriving[last] = leaving[last] = unit(unit(points[last] - points[last - 1]) * 2.0 - leaving[last - 1]);
+			}
+		}
+		T at(double t) const
+		{
+			const double end = static_cast<double>(points.size() - 1);
+			t = glm::clamp(t, 0.0, end);
+			const size_t i = std::min(static_cast<size_t>(t), points.size() - 2);
+			const double f = t - static_cast<double>(i), f2 = f * f, f3 = f2 * f;
+			const double l = glm::length(points[i + 1] - points[i]);
+			return points[i] * (2 * f3 - 3 * f2 + 1) + leaving[i] * (l * (f3 - 2 * f2 + f)) + points[i + 1] * (3 * f2 - 2 * f3) + arriving[i + 1] * (l * (f3 - f2));
+		}
+	};
+
 	// S(u, v) = centre + radius * (cos u * X + sin u * Y) + v * Z
 	inline bool TriangulateTrimmedCylinder(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{
@@ -526,6 +570,8 @@ namespace webifc::geometry
 		s.direct = true;
 		s.outerTurn = outerTurn;
 		s.even = true;
+		s.plain = true;
+		s.turnU = 2 * CONST_PI; s.lengthU = 2 * CONST_PI * radius; s.lengthV = high - low;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
@@ -566,9 +612,11 @@ namespace webifc::geometry
 		s.u0 = 0; s.u1 = 2 * CONST_PI; s.v0 = 0; s.v1 = last; s.wrapU = true;
 		const bool closed = glm::distance(profile.front(), profile.back()) < widest * 1e-9;
 		s.wrapV = closed;
+		auto curve = std::make_shared<TrimCurve<glm::dvec2>>();
+		curve->build(line->flat, closed);
 		s.point = [=](double u, double v)
 		{
-			const glm::dvec2 rh = TrimPolyline::at(line->flat, v);
+			const glm::dvec2 rh = curve->at(v);
 			const double angle = u + TrimPolyline::at(*angles, v);
 			return origin + rh.x * (std::cos(angle) * X + std::sin(angle) * Y) + rh.y * Z;
 		};
@@ -586,7 +634,6 @@ namespace webifc::geometry
 		};
 		s.direct = true;
 		s.outerTurn = outerTurn;
-		s.creased = 1;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 
@@ -606,13 +653,17 @@ namespace webifc::geometry
 		auto profile = std::make_shared<std::vector<glm::dvec3>>(given.begin(), given.end());
 		auto line = std::make_shared<TrimPolyline>();
 		for (auto const& pt : *profile) line->flat.emplace_back(glm::dot(pt, X), glm::dot(pt, Y));
+		double reach = 0;
+		for (auto const& pt : *profile) reach = std::max(reach, glm::distance(pt, profile->front()));
+		auto curve = std::make_shared<TrimCurve<glm::dvec3>>();
+		curve->build(*profile, reach > 0 && glm::distance(profile->front(), profile->back()) < reach * 1e-9);
 		const double last = static_cast<double>(profile->size() - 1);
 		const auto local = [=](glm::dvec3 const& pt, double& u, double& v)
 		{
 			const glm::dvec3 q = glm::dvec3(back * glm::dvec4(pt, 1.0));
 			double left = 0;
 			u = line->nearest({ glm::dot(q, X), glm::dot(q, Y) }, left);
-			v = glm::dot(q - TrimPolyline::at(*profile, u), d);
+			v = glm::dot(q - curve->at(u), d);
 			return left;
 		};
 		double low = std::numeric_limits<double>::max(), high = std::numeric_limits<double>::lowest();
@@ -628,7 +679,7 @@ namespace webifc::geometry
 		s.point = [=](double u, double v)
 		{
 			double in = u;
-			return glm::dvec3(placement * glm::dvec4(TrimPolyline::at(*profile, in) + d * v, 1.0));
+			return glm::dvec3(placement * glm::dvec4(curve->at(in) + d * v, 1.0));
 		};
 		s.project = [=](glm::dvec3 const& pt, glm::dvec2& uv)
 		{
@@ -640,7 +691,6 @@ namespace webifc::geometry
 		};
 		s.direct = true;
 		s.outerTurn = outerTurn;
-		s.creased = 0;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
 

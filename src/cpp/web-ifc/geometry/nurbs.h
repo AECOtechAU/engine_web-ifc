@@ -36,6 +36,10 @@ namespace webifc::geometry{
 		bool direct = false;
 		// The surface turns by the same amount everywhere, and the bounds lie on it
 		bool even = false;
+		// The surface's turning (radians across the whole range) and lengths along each parameter are given
+		// here and it has no poles: no coarse picture of it is taken
+		bool plain = false;
+		double turnU = 0, turnV = 0, lengthU = 0, lengthV = 0;
 		// The surface is creased wherever this parameter (0: the first, 1: the second) is a whole number
 		int creased = -1;
 		// The way the outer bound runs in the parameter plane, where the file says: +1 anticlockwise (the face

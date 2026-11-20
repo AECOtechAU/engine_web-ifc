@@ -18,6 +18,9 @@ namespace webifc::geometry{
 	constexpr int TRIM_MAX_STEPS { 48 };
 	constexpr int TRIM_SEED_GRID { 12 };
 	constexpr int TRIM_REFINE_ROUNDS { 6 };
+	// Where a surface turns evenly, an edge shorter than this many allowed turns (squared) is not measured:
+	// its outline is sampled at the loader's circle steps, and edges across one such step are as good as the outline
+	constexpr double TRIM_EVEN_SKIP { 4.0 };
 
 	void Nurbs::fill_geometry(){
 		if (!_initialized) {
@@ -93,7 +96,7 @@ namespace webifc::geometry{
 			// A coarse picture of the surface: where to start each search, and how much it turns
 			const int G = s.direct ? TRIM_SEED_GRID / 2 : TRIM_SEED_GRID; // a surface worked out directly needs only its turning and lengths from this
 			std::vector<glm::dvec3> grid((G + 1) * (G + 1));
-			for (int i = 0; i <= G; i++)
+			for (int i = 0; i <= G && !s.plain; i++)
 				for (int j = 0; j <= G; j++)
 					grid[i * (G + 1) + j] = s.point(u0 + (u1 - u0) * i / G, v0 + (v1 - v0) * j / G);
 			const auto seed = [&](glm::dvec3 const& pt, double& interior)
@@ -128,7 +131,7 @@ namespace webifc::geometry{
 			// Where a surface closed round its first parameter comes to a point at an end of the second (a pole)
 			bool poleLow = false, poleHigh = false;
 			const glm::dvec3 tipLow = grid[0], tipHigh = grid[G];
-			if (s.wrapU)
+			if (s.wrapU && !s.plain)
 			{
 				poleLow = poleHigh = true;
 				for (int k = 1; k <= G; k++)
@@ -440,6 +443,11 @@ namespace webifc::geometry{
 			// Rows of points inside the face: as many as the surface turns across it
 			const auto turning = [&](bool alongU, bool whole = false)
 			{
+				if (s.plain)
+				{
+					const double all = alongU ? s.turnU : s.turnV;
+					return whole ? all : all * std::min(1.0, alongU ? (maxU - minU) / (u1 - u0) : (maxV - minV) / (v1 - v0));
+				}
 				double most = 0;
 				for (int line = 0; line <= G; line++)
 				{
@@ -493,12 +501,66 @@ namespace webifc::geometry{
 					positions.push_back(s.point(in.x, in.y));
 				}
 
+			// One outline, nothing inside it, and the surface straight one way: a strip between the outline's two
+			// sides, each run along the direction the surface turns in
+			CDT::TriangleVec triangles;
+			bool strip = false;
+			if (round.empty() && loops.size() == 1 && vertices.size() == boundCount && (stepsU == 1 || stepsV == 1))
+			{
+				for (int tryAxis = 0; tryAxis < 2 && !strip; tryAxis++)
+				{
+					const bool alongU = (stepsV == 1) == (tryAxis == 0);
+					if (!alongU && stepsU != 1) continue;
+					if (alongU && stepsV != 1) continue;
+					const auto along = [&](size_t i) { return alongU ? vertices[i].x : vertices[i].y; };
+					const size_t n = vertices.size();
+					size_t least = 0, most = 0;
+					for (size_t i = 1; i < n; i++) { if (along(i) < along(least)) least = i; if (along(i) > along(most)) most = i; }
+					if (least == most) continue;
+					std::vector<CDT::VertInd> one, other;
+					for (size_t i = least;; i = (i + 1) % n) { one.push_back(static_cast<CDT::VertInd>(i)); if (i == most) break; }
+					for (size_t i = least;; i = (i + n - 1) % n) { other.push_back(static_cast<CDT::VertInd>(i)); if (i == most) break; }
+					// each side must run strictly onwards: a step straight across (a notch in the outline) would be
+					// bridged by a triangle outside the face. Only the two ends of the strip may run straight across.
+					bool rising = true;
+					for (auto const* side : { &one, &other })
+					{
+						// straight across at the start, then strictly onwards, then straight across at the end
+						int stage = 0;
+						for (size_t i = 1; i < side->size() && rising; i++)
+						{
+							const double step = along((*side)[i]) - along((*side)[i - 1]);
+							if (step < 0) rising = false;
+							else if (step > 0) { if (stage == 2) rising = false; stage = 1; }
+							else if (stage == 1) stage = 2;
+						}
+					}
+					if (!rising) continue;
+					triangles.clear();
+					size_t i = 0, j = 0;
+					while (i + 1 < one.size() || j + 1 < other.size())
+					{
+						const bool takeOne = j + 1 >= other.size() || (i + 1 < one.size() && along(one[i + 1]) <= along(other[j + 1]));
+						const CDT::VertInd next = takeOne ? one[i + 1] : other[j + 1];
+						if (one[i] != other[j] && next != one[i] && next != other[j])
+						{
+							CDT::Triangle made;
+							made.vertices = { one[i], other[j], next };
+							triangles.push_back(made);
+						}
+						if (takeOne) i++; else j++;
+					}
+					strip = !triangles.empty();
+				}
+			}
+			if (!strip)
+			{
 			double stretchU = 1, stretchV = 1;
 			// The parameter plane stretched to the surface's own distances: there the triangulation picks the
 			// triangles that are well shaped on the surface
 			{
-				double alongU = 0, alongV = 0;
-				for (int line = 0; line <= G; line++)
+				double alongU = s.lengthU, alongV = s.lengthV;
+				for (int line = 0; line <= G && !s.plain; line++)
 					for (int k = 0; k < G; k++)
 					{
 						alongU += glm::distance(grid[(k + 1) * (G + 1) + line], grid[k * (G + 1) + line]);
@@ -548,23 +610,32 @@ namespace webifc::geometry{
 			const size_t mostPoints = vertices.size() * 4 + 128;
 			// where the surface itself puts each vertex (a bound point may sit a hair off it)
 			std::vector<glm::dvec3> onSurface;
-			CDT::TriangleVec triangles;
+			std::vector<char> known;
+			// The outline is triangulated once; points the refinement asks for are added to that triangulation
+			CDT::Triangulation<double> whole{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
+			whole.insertVertices(vertices);
+			whole.insertEdges(once);
 			for (int pass = 0;; pass++)
 			{
-				CDT::Triangulation<double> triangulator{ CDT::VertexInsertionOrder::Auto, CDT::IntersectingConstraintEdges::NotAllowed, 0.0 };
-				triangulator.insertVertices(vertices);
-				triangulator.insertEdges(once);
-				triangulator.eraseOuterTrianglesAndHoles();
-				triangles = triangulator.triangles;
+				{
+					CDT::Triangulation<double> inside = whole;
+					inside.eraseOuterTrianglesAndHoles();
+					triangles = std::move(inside.triangles);
+				}
 				if (triangles.empty()) return false;
 				if (pass == TRIM_REFINE_ROUNDS || vertices.size() >= mostPoints) break;
 				// an inner edge that strays from the surface gets a point at its middle
-				if (s.even) onSurface = positions;
-				for (size_t v = onSurface.size(); v < vertices.size(); v++)
+				onSurface.resize(vertices.size()); known.resize(vertices.size(), 0);
+				const auto surfaceAt = [&](size_t v) -> glm::dvec3 const&
 				{
-					const uv_point_t in = s.wrapped({ vertices[v].x / stretchU, vertices[v].y / stretchV });
-					onSurface.push_back(s.point(in.x, in.y));
-				}
+					if (s.even) return positions[v];
+					if (!known[v])
+					{
+						const uv_point_t in = s.wrapped({ vertices[v].x / stretchU, vertices[v].y / stretchV });
+						onSurface[v] = s.point(in.x, in.y); known[v] = 1;
+					}
+					return onSurface[v];
+				};
 				std::vector<CDT::V2d<double>> more;
 				std::vector<glm::dvec3> moreAt;
 				for (auto const& triangle : triangles)
@@ -578,7 +649,7 @@ namespace webifc::geometry{
 						if (length < close * 10) continue;
 						// one unit of the stretched plane is one allowed turn
 						const double span2 = (vertices[i].x - vertices[j].x) * (vertices[i].x - vertices[j].x) + (vertices[i].y - vertices[j].y) * (vertices[i].y - vertices[j].y);
-						if (span2 < (s.even ? 2.0 : 0.04)) continue;
+						if (span2 < (s.even ? TRIM_EVEN_SKIP : 0.04)) continue;
 						// across a crease the split goes on the crease
 						double share = 0.5;
 						if (s.creased >= 0)
@@ -586,16 +657,25 @@ namespace webifc::geometry{
 							const double a = (s.creased == 0 ? vertices[i].x / stretchU : vertices[i].y / stretchV), b = (s.creased == 0 ? vertices[j].x / stretchU : vertices[j].y / stretchV);
 							const double crease = std::round((a + b) / 2);
 							if (crease > std::min(a, b) + 1e-6 && crease < std::max(a, b) - 1e-6) share = (crease - a) / (b - a);
+							else
+							{
+								// between creases the surface is straight along that parameter: only the other counts
+								const double other = s.creased == 0 ? vertices[i].y - vertices[j].y : vertices[i].x - vertices[j].x;
+								if (other * other < TRIM_EVEN_SKIP) continue;
+							}
 						}
 						const CDT::V2d<double> mid{ vertices[i].x + (vertices[j].x - vertices[i].x) * share, vertices[i].y + (vertices[j].y - vertices[i].y) * share };
 						const uv_point_t in = s.wrapped({ mid.x / stretchU, mid.y / stretchV });
 						const glm::dvec3 on = s.point(in.x, in.y);
-						if (glm::distance(on, onSurface[i] + (onSurface[j] - onSurface[i]) * share) <= std::max(close * 0.5, length * s.stray)) continue;
+						const glm::dvec3 atI = surfaceAt(i), atJ = surfaceAt(j);
+						if (glm::distance(on, atI + (atJ - atI) * share) <= std::max(close * 0.5, length * s.stray)) continue;
 						more.push_back(mid); moreAt.push_back(on);
 					}
 				if (more.empty()) break;
 				vertices.insert(vertices.end(), more.begin(), more.end());
 				positions.insert(positions.end(), moreAt.begin(), moreAt.end());
+				whole.insertVertices(more);
+			}
 			}
 			for (auto const& triangle : triangles)
 			{
