@@ -38,6 +38,10 @@ namespace webifc::geometry{
 		bool even = false;
 		// The surface is creased wherever this parameter (0: the first, 1: the second) is a whole number
 		int creased = -1;
+		// How far apart two neighbouring directions of the surface may be before another row of points goes in
+		double turnStep = 0.35;
+		// An inner edge may stray from the surface by this share of its length before it is split
+		double stray = 0.066;
 		std::function<glm::dvec3(double, double)> point;
 		// The parameters of the surface point nearest a position, searched from the parameters given and on
 		// the turn of the surface nearest them; returns the distance left

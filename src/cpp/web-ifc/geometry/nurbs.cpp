@@ -12,11 +12,11 @@
 namespace webifc::geometry{
 
 	// How far apart two neighbouring directions of the surface may be before another row of points goes in
-	constexpr double TRIM_TURN_STEP { 0.35 };
+	// Free-form faces: rows of points every 12 degrees of turn, edges kept within a chord across 14
+	constexpr double TRIM_FREEFORM_TURN_STEP { 0.21 };
+	constexpr double TRIM_FREEFORM_STRAY { 0.03 };
 	constexpr int TRIM_MAX_STEPS { 48 };
 	constexpr int TRIM_SEED_GRID { 12 };
-	// An edge may stray from the surface by this share of its length (a chord across TRIM_TURN_STEP)
-	constexpr double TRIM_STRAY { 0.066 };
 	constexpr int TRIM_REFINE_ROUNDS { 6 };
 
 	void Nurbs::fill_geometry(){
@@ -374,8 +374,8 @@ namespace webifc::geometry{
 				const double span = std::min(1.0, alongU ? (maxU - minU) / (u1 - u0) : (maxV - minV) / (v1 - v0));
 				return most * std::min(1.0, span * G / std::max(1.0, span * G - 1.0) );
 			};
-			const int stepsU = glm::clamp(static_cast<int>(std::ceil(turning(true) / TRIM_TURN_STEP)), 1, TRIM_MAX_STEPS);
-			const int stepsV = glm::clamp(static_cast<int>(std::ceil(turning(false) / TRIM_TURN_STEP)), 1, TRIM_MAX_STEPS);
+			const int stepsU = glm::clamp(static_cast<int>(std::ceil(turning(true) / s.turnStep)), 1, TRIM_MAX_STEPS);
+			const int stepsV = glm::clamp(static_cast<int>(std::ceil(turning(false) / s.turnStep)), 1, TRIM_MAX_STEPS);
 			const double stepU = (maxU - minU) / stepsU, stepV = (maxV - minV) / stepsV;
 			for (int i = 1; i < stepsU; i++)
 				for (int j = 1; j < stepsV; j++)
@@ -411,8 +411,8 @@ namespace webifc::geometry{
 					}
 				// one unit is one allowed turn of the surface, or a twentieth of its longer side
 				const double longer = std::max(alongU, alongV);
-				const double perU = longer > 0 ? (turning(true, true) / TRIM_TURN_STEP + 0.05 * alongU / longer) / (u1 - u0) : 0;
-				const double perV = longer > 0 ? (turning(false, true) / TRIM_TURN_STEP + 0.05 * alongV / longer) / (v1 - v0) : 0;
+				const double perU = longer > 0 ? (turning(true, true) / s.turnStep + 0.05 * alongU / longer) / (u1 - u0) : 0;
+				const double perV = longer > 0 ? (turning(false, true) / s.turnStep + 0.05 * alongV / longer) / (v1 - v0) : 0;
 				if (perU > 0 && perV > 0 && std::isfinite(perU) && std::isfinite(perV))
 				{
 					for (auto& v : vertices) { v.x *= perU; v.y *= perV; }
@@ -495,7 +495,7 @@ namespace webifc::geometry{
 						const CDT::V2d<double> mid{ vertices[i].x + (vertices[j].x - vertices[i].x) * share, vertices[i].y + (vertices[j].y - vertices[i].y) * share };
 						const uv_point_t in = s.wrapped({ mid.x / stretchU, mid.y / stretchV });
 						const glm::dvec3 on = s.point(in.x, in.y);
-						if (glm::distance(on, onSurface[i] + (onSurface[j] - onSurface[i]) * share) <= std::max(close * 0.5, length * TRIM_STRAY)) continue;
+						if (glm::distance(on, onSurface[i] + (onSurface[j] - onSurface[i]) * share) <= std::max(close * 0.5, length * s.stray)) continue;
 						more.push_back(mid); moreAt.push_back(on);
 					}
 				if (more.empty()) break;
@@ -525,6 +525,8 @@ namespace webifc::geometry{
 		TrimSurface s;
 		s.u0 = range_knots_u.x; s.u1 = range_knots_u.y; s.v0 = range_knots_v.x; s.v1 = range_knots_v.y;
 		s.findWraps = true;
+		s.turnStep = TRIM_FREEFORM_TURN_STEP;
+		s.stray = TRIM_FREEFORM_STRAY;
 		s.point = [this](double u, double v) { return glm::dvec3(tinynurbs::surfacePoint(*this->nurbs, u, v)); };
 		s.project = [this, &s](glm::dvec3 const& pt, glm::dvec2& uv)
 		{
