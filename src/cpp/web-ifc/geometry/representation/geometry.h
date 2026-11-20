@@ -45,6 +45,22 @@ namespace webifc::geometry {
 		const double EXTRUSION_DISTANCE_HALFSPACE_M = 100;
 
 		enum IfcTrimmingSelectType { TRIM_NONE, TRIM_BY_POSITION, TRIM_BY_PARAMETER, TRIM_BY_LENGTH };
+		// How much of a turn one side of a round thing covers, by its radius in metres: 8 sides under 100 mm
+		// across, 12 under 300 mm, 20 above, and never further than 10 mm from the curve
+		inline double RoundStep(double radiusMetres)
+		{
+			const double across = 2 * radiusMetres;
+			double step = 6.283185307179586 / (across < 0.1 ? 8.0 : (across < 0.3 ? 12.0 : 20.0));
+			if (radiusMetres > 0.010) step = std::min(step, 2 * std::acos(1 - 0.010 / radiusMetres));
+			return step;
+		}
+
+		// The straight pieces an arc of that radius and sweep is drawn with
+		inline int RoundSegments(double radiusMetres, double sweep)
+		{
+			return std::max(1, static_cast<int>(std::ceil(std::abs(sweep) / RoundStep(radiusMetres) - 1e-6)));
+		}
+
 		struct IfcTrimmingSelect
 		{
 			IfcTrimmingSelectType trimType = TRIM_NONE;

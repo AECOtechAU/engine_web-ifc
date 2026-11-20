@@ -302,7 +302,7 @@ inline IfcCurve Build3DArc3Pt(const glm::dvec3 &p1, const glm::dvec3 &p2, const 
 
 	// The part of a B-spline curve between the curve points nearest two positions: an edge between its vertices.
 	// The ends are the positions themselves, so neighbouring edges and faces meet exactly.
-	inline	std::vector<glm::dvec3> GetTrimmedRationalBSplineCurveWithKnots(int degree, const std::vector<glm::dvec3> &points, const std::vector<double> &knots, const std::vector<double> &weights, const glm::dvec3 &from, const glm::dvec3 &to)
+	inline	std::vector<glm::dvec3> GetTrimmedRationalBSplineCurveWithKnots(int degree, const std::vector<glm::dvec3> &points, const std::vector<double> &knots, const std::vector<double> &weights, const glm::dvec3 &from, const glm::dvec3 &to, double metres = 0)
 	{
 		const auto at = [&](double t) { return InterpolateRationalBSplineCurveWithKnots(glm::clamp(t, 0.0, 1.0), degree, points, knots, weights); };
 		const int coarse = std::max<int>(32, static_cast<int>(points.size()) * 8);
@@ -323,11 +323,44 @@ inline IfcCurve Build3DArc3Pt(const glm::dvec3 &p1, const glm::dvec3 &p2, const 
 		double t0 = nearest(from), t1 = nearest(to);
 		// one vertex at both ends: the whole of a closed curve
 		if (std::abs(t1 - t0) < 1e-9) { t0 = 0; t1 = 1; }
-		const int steps = glm::clamp(static_cast<int>(std::ceil(points.size() * 2 * std::abs(t1 - t0))), 1, 256);
-		std::vector<glm::dvec3> c(steps + 1);
-		for (int i = 1; i < steps; i++) c[i] = at(t0 + (t1 - t0) * i / steps);
-		c.front() = from;
-		c.back() = to;
+		if (metres <= 0)
+		{
+			const int steps = glm::clamp(static_cast<int>(std::ceil(points.size() * 2 * std::abs(t1 - t0))), 1, 256);
+			std::vector<glm::dvec3> c(steps + 1);
+			for (int i = 1; i < steps; i++) c[i] = at(t0 + (t1 - t0) * i / steps);
+			c.front() = from;
+			c.back() = to;
+			return c;
+		}
+		// Finely first, then only the points needed to stay within what a circle of this size is allowed
+		const int fine = glm::clamp(static_cast<int>(std::ceil(points.size() * 8 * std::abs(t1 - t0))), 8, 512);
+		std::vector<glm::dvec3> d(fine + 1);
+		for (int i = 1; i < fine; i++) d[i] = at(t0 + (t1 - t0) * i / fine);
+		d.front() = from;
+		d.back() = to;
+		double reach = 0;
+		for (auto const &pt : d) reach = std::max(reach, glm::distance(pt, d.front()));
+		const double radius = reach / 2;
+		const double allowed = radius * (1 - std::cos(RoundStep(radius * metres) / 2));
+		const auto off = [](const glm::dvec3 &p, const glm::dvec3 &a, const glm::dvec3 &b)
+		{
+			const glm::dvec3 ab = b - a; const double len2 = glm::dot(ab, ab);
+			const double t = len2 > 0 ? glm::clamp(glm::dot(p - a, ab) / len2, 0.0, 1.0) : 0.0;
+			return glm::distance(p, a + ab * t);
+		};
+		std::vector<glm::dvec3> c { d.front() };
+		for (int i = 0; i < fine;)
+		{
+			int j = i + 1;
+			for (; j < fine; j++)
+			{
+				bool within = true;
+				for (int k = i + 1; k <= j && within; k++) within = off(d[k], d[i], d[j + 1]) <= allowed;
+				if (!within) break;
+			}
+			c.push_back(d[j]);
+			i = j;
+		}
 		return c;
 	}
 

@@ -2575,6 +2575,9 @@ namespace webifc::geometry
         curve.arcSegments.push_back(curve.points.size());
         int numPointsCurrentArc = _circleSegments;
         numPointsCurrentArc = std::max(numPointsCurrentArc, 4);
+        // the circular edge of a brep: sides by its size and sweep
+        if (params.edge && dimensions == 3)
+          numPointsCurrentArc = RoundSegments(std::max(radius1, radius2) * _cache.GetLinearScalingFactor(), openingAngleRad) + 1;
         double deltaAngle = openingAngleRad / (numPointsCurrentArc - 1);
         double angle = startRad;
         std::vector<glm::dvec3> points;
@@ -3179,7 +3182,7 @@ namespace webifc::geometry
         double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
-          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D, _cache.GetLinearScalingFactor())
           : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);
@@ -3273,7 +3276,7 @@ namespace webifc::geometry
         double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
-          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D, _cache.GetLinearScalingFactor())
           : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);
@@ -3364,7 +3367,7 @@ namespace webifc::geometry
         double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
-          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
+          ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D, _cache.GetLinearScalingFactor())
           : GetRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, numCurvePoints);
         for (size_t i = 0; i < tempPoints.size(); i++)
           curve.Add(tempPoints[i]);

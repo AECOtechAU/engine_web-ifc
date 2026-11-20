@@ -544,6 +544,21 @@ namespace webifc::geometry
 		}
 	};
 
+	// The parameter of the point of a smooth curve nearest a position, searched a point either side of a first
+	// guess (the nearest on the straight pieces), and how far off it is
+	inline double TrimNearestOnCurve(TrimCurve<glm::dvec2> const& curve, glm::dvec2 const& q, double guess, double& distance)
+	{
+		double lo = std::max(0.0, guess - 1), hi = std::min(static_cast<double>(curve.points.size() - 1), guess + 1);
+		for (int i = 0; i < 14; i++)
+		{
+			const double a = lo + (hi - lo) / 3, b = hi - (hi - lo) / 3;
+			if (glm::distance(curve.at(a), q) < glm::distance(curve.at(b), q)) hi = b; else lo = a;
+		}
+		const double t = (lo + hi) / 2;
+		distance = glm::distance(curve.at(t), q);
+		return t;
+	}
+
 	// S(u, v) = centre + radius * (cos u * X + sin u * Y) + v * Z
 	inline bool TriangulateTrimmedCylinder(IfcGeometry &geometry, std::vector<IfcBound3D> const& bounds, IfcSurface const& surface, double scaling, int outerTurn = 0)
 	{
@@ -571,6 +586,9 @@ namespace webifc::geometry
 		s.outerTurn = outerTurn;
 		s.even = true;
 		s.plain = true;
+		// meshed to the step its outline is drawn with
+		s.turnStep = RoundStep(radius * scaling);
+		s.stray = 1.5 * (1 - std::cos(s.turnStep / 2)) / (2 * std::sin(s.turnStep / 2));
 		s.turnU = 2 * CONST_PI; s.lengthU = 2 * CONST_PI * radius; s.lengthV = high - low;
 		return TriangulateTrimmedSurface(geometry, bounds, s, scaling);
 	}
@@ -612,6 +630,9 @@ namespace webifc::geometry
 		s.u0 = 0; s.u1 = 2 * CONST_PI; s.v0 = 0; s.v1 = last; s.wrapU = true;
 		const bool closed = glm::distance(profile.front(), profile.back()) < widest * 1e-9;
 		s.wrapV = closed;
+		// meshed to the step its outline is drawn with
+		s.turnStep = RoundStep(widest * scaling);
+		s.stray = 1.5 * (1 - std::cos(s.turnStep / 2)) / (2 * std::sin(s.turnStep / 2));
 		auto curve = std::make_shared<TrimCurve<glm::dvec2>>();
 		curve->build(line->flat, closed);
 		s.point = [=](double u, double v)
@@ -626,6 +647,7 @@ namespace webifc::geometry
 			const double x = glm::dot(d, X), y = glm::dot(d, Y), r = std::hypot(x, y);
 			double left = 0;
 			double v = line->nearest({ r, glm::dot(d, Z) }, left);
+			v = TrimNearestOnCurve(*curve, { r, glm::dot(d, Z) }, v, left);
 			double angle = r > widest * 1e-9 ? std::atan2(y, x) - TrimPolyline::at(*angles, v) : uv.x;
 			angle += std::round((uv.x - angle) / (2 * CONST_PI)) * (2 * CONST_PI);
 			if (closed) v += std::round((uv.y - v) / last) * last;
@@ -657,12 +679,15 @@ namespace webifc::geometry
 		for (auto const& pt : *profile) reach = std::max(reach, glm::distance(pt, profile->front()));
 		auto curve = std::make_shared<TrimCurve<glm::dvec3>>();
 		curve->build(*profile, reach > 0 && glm::distance(profile->front(), profile->back()) < reach * 1e-9);
+		auto across = std::make_shared<TrimCurve<glm::dvec2>>();
+		across->build(line->flat, reach > 0 && glm::distance(profile->front(), profile->back()) < reach * 1e-9);
 		const double last = static_cast<double>(profile->size() - 1);
 		const auto local = [=](glm::dvec3 const& pt, double& u, double& v)
 		{
 			const glm::dvec3 q = glm::dvec3(back * glm::dvec4(pt, 1.0));
 			double left = 0;
 			u = line->nearest({ glm::dot(q, X), glm::dot(q, Y) }, left);
+			u = TrimNearestOnCurve(*across, { glm::dot(q, X), glm::dot(q, Y) }, u, left);
 			v = glm::dot(q - curve->at(u), d);
 			return left;
 		};
