@@ -33,6 +33,14 @@ namespace webifc::geometry
 		return on;
 	}
 
+	// Set while a pipe fitting is meshed: it is made solid - every opening in its flat faces is filled (its
+	// ends capped) and its bore left out. Couplings stay hollow rings.
+	inline bool &MakeSolid()
+	{
+		static bool solid = false;
+		return solid;
+	}
+
 	inline double LoopArea(const std::vector<glm::dvec2> &poly)
 	{
 		double area = 0;
@@ -122,6 +130,11 @@ namespace webifc::geometry
 	inline void DropSmallHoles(IfcProfile &profile, double metres)
 	{
 		if (!FillSmallOpeningsOn() || profile.holes.empty()) return;
+		if (MakeSolid())
+		{
+			profile.holes.clear();
+			return;
+		}
 		if (profile.holes.size() == 1)
 		{
 			std::vector<glm::dvec2> outline, opening;
@@ -311,6 +324,7 @@ namespace webifc::geometry
 		std::vector<glm::dvec2> poly;
 		std::vector<glm::dvec3> points;
 		double minU, maxU, minV, maxV;
+		bool bore = false; // in a fitting made solid: what joins it goes into the solid
 	};
 
 	inline glm::dvec3 NewellNormal(const std::vector<glm::dvec3> &pts)
@@ -325,6 +339,34 @@ namespace webifc::geometry
 		return n;
 	}
 
+	// Whether what joins an opening's edge stands out of the face it is in (a boss, or the body of a fitting
+	// beyond a socket's shoulder) and so is no opening into the solid. `n` points out of the solid.
+	inline bool StandsProud(const std::vector<ShellFace> &faces, size_t owner, const std::vector<glm::dvec3> &loop, const glm::dvec3 &o, const glm::dvec3 &n, double metres)
+	{
+		const double grid = metres * 1e6, tol = 0.0001 / metres;
+		auto keyOf = [&](const glm::dvec3 &a)
+		{
+			const long long q[3] = {std::llround(a.x * grid), std::llround(a.y * grid), std::llround(a.z * grid)};
+			return std::string(reinterpret_cast<const char *>(q), sizeof(q));
+		};
+		std::unordered_map<std::string, bool> on;
+		for (const auto &p : loop) on[keyOf(p)] = true;
+		for (size_t f = 0; f < faces.size(); f++)
+		{
+			if (f == owner) continue;
+			int shared = 0;
+			double hi = -std::numeric_limits<double>::max();
+			for (const auto &b : faces[f].bounds)
+				for (const auto &p : b.curve.points)
+				{
+					if (on.count(keyOf(p))) shared++;
+					hi = std::max(hi, glm::dot(p - o, n));
+				}
+			if (shared >= 2 && hi > tol) return true;
+		}
+		return false;
+	}
+
 	// Fills the small openings of a shell's flat faces (their inner bounds are removed) and marks the faces that
 	// sat in or behind them as dropped. Returns how many openings were filled.
 	inline int FillSmallOpenings(std::vector<ShellFace> &faces, double metres, bool *tube = nullptr)
@@ -335,19 +377,13 @@ namespace webifc::geometry
 		{
 			auto &face = faces[f];
 			if (!face.planar || face.bounds.size() < 2) continue;
-			// the outline: the bound called outer, else the biggest
-			size_t outer = face.bounds.size();
+			// the outline is the biggest bound, whatever it is called (the label is sometimes on the opening)
+			size_t outer = 0;
+			double best = -1;
 			for (size_t i = 0; i < face.bounds.size(); i++)
-				if (face.bounds[i].type == IfcBoundType::OUTERBOUND) { outer = i; break; }
-			std::vector<glm::dvec3> normals(face.bounds.size());
-			if (outer == face.bounds.size())
 			{
-				double best = -1;
-				for (size_t i = 0; i < face.bounds.size(); i++)
-				{
-					normals[i] = NewellNormal(face.bounds[i].curve.points);
-					if (glm::length(normals[i]) > best) { best = glm::length(normals[i]); outer = i; }
-				}
+				const double size = glm::length(NewellNormal(face.bounds[i].curve.points));
+				if (size > best) { best = size; outer = i; }
 			}
 			const auto &outline = face.bounds[outer].curve.points;
 			if (outline.size() < 3) continue;
@@ -372,16 +408,25 @@ namespace webifc::geometry
 			kept.reserve(face.bounds.size());
 			for (size_t i = 0; i < face.bounds.size(); i++)
 			{
-				if (i == outer) { kept.push_back(face.bounds[i]); continue; }
-				auto poly = flat(face.bounds[i].curve.points);
-				// an opening sits inside the outline and is smaller than it
-				if (poly.size() < 3 || std::abs(LoopArea(poly)) >= outlineArea || !IsSmallOpening(poly, metres))
+				if (i == outer)
 				{
 					kept.push_back(face.bounds[i]);
+					kept.back().type = IfcBoundType::OUTERBOUND;
+					continue;
+				}
+				auto poly = flat(face.bounds[i].curve.points);
+				// an opening sits inside the outline and is smaller than it
+				// (in a fitting made solid an opening of any size counts, if what joins it goes into the solid: its bore)
+				const bool bore = MakeSolid() && poly.size() >= 3 && !StandsProud(faces, f, face.bounds[i].curve.points, o, n, metres);
+				if (poly.size() < 3 || std::abs(LoopArea(poly)) >= outlineArea || !(bore || IsSmallOpening(poly, metres)))
+				{
+					kept.push_back(face.bounds[i]);
+					kept.back().type = IfcBoundType::BOUND;
 					continue;
 				}
 				FilledLoop loop;
 				loop.owner = f; loop.o = o; loop.x = x; loop.y = y; loop.n = n;
+				loop.bore = bore;
 				loop.minU = loop.minV = std::numeric_limits<double>::max();
 				loop.maxU = loop.maxV = -std::numeric_limits<double>::max();
 				for (const auto &q : poly)
@@ -511,6 +556,46 @@ namespace webifc::geometry
 				auto it = edges.find(keyOf(l.points[j], l.points[i]));
 				if (it != edges.end()) it->second.filledLoop = true;
 			}
+		// A fitting made solid: its bore is every face reached from a filled opening's edge without crossing a
+		// filled face. Should that reach the outside (an end that was not one flat face with an opening), the
+		// check below puts it all back.
+		if (MakeSolid())
+		{
+			std::vector<uint32_t> reached;
+			auto reach = [&](uint32_t f)
+			{
+				if (faces[f].filled || faces[f].dropped) return;
+				faces[f].dropped = true;
+				reached.push_back(f);
+			};
+			for (const auto &l : loops)
+			{
+				if (!l.bore) continue;
+				for (size_t i = 0, j = l.points.size() - 1; i < l.points.size(); j = i++)
+				{
+					auto it = edges.find(keyOf(l.points[j], l.points[i]));
+					if (it == edges.end()) continue;
+					for (const auto f : it->second.faces)
+						if (f != l.owner) reach(f);
+				}
+			}
+			while (!reached.empty())
+			{
+				const uint32_t f = reached.back();
+				reached.pop_back();
+				for (const auto &bound : faces[f].bounds)
+				{
+					const auto &pts = bound.curve.points;
+					for (size_t i = 0, j = pts.size() - 1; i < pts.size(); j = i++)
+					{
+						if (pts[i] == pts[j]) continue;
+						const auto &use = edges[keyOf(pts[j], pts[i])];
+						if (use.filledLoop) continue;
+						for (const auto other : use.faces) reach(other);
+					}
+				}
+			}
+		}
 		for (bool changed = true; changed;)
 		{
 			changed = false;

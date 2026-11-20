@@ -99,6 +99,8 @@ namespace webifc::geometry
     std::unordered_map<uint32_t, std::vector<uint32_t>> _portsOf;
     std::unordered_set<uint32_t> _connectedPorts;
     bool _portsRead = false;
+    bool _pipeFittingsRead = false;
+    std::unordered_set<uint32_t> _pipeFittings;
     // Where the run being meshed is connected to its neighbours: the end caps there are left out
     std::vector<glm::dvec3> _joinedEnds;
     void ReadPorts();

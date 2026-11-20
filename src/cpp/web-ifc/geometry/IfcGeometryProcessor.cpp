@@ -2103,8 +2103,41 @@ namespace webifc::geometry
         const auto elementType = _loader.GetLineType(expressID);
         const bool run = elementType == schema::IFCPIPESEGMENT || elementType == schema::IFCDUCTSEGMENT || elementType == schema::IFCCABLECARRIERSEGMENT || elementType == schema::IFCFLOWSEGMENT;
         RoundRunSides() = run ? 18 : 0;
+        // A pipe fitting is made solid (bore left out, ends capped); couplings stay hollow rings. In IFC2x3
+        // every fitting is an IfcFlowFitting: the pipe ones are those whose type is an IfcPipeFittingType.
+        bool fitting = elementType == schema::IFCPIPEFITTING;
+        if (elementType == schema::IFCFLOWFITTING)
+        {
+            if (!_pipeFittingsRead)
+            {
+                _pipeFittingsRead = true;
+                for (const uint32_t rel : _loader.GetExpressIDsWithType(schema::IFCRELDEFINESBYTYPE))
+                {
+                    _loader.MoveToArgumentOffset(rel, 5);
+                    if (_loader.GetTokenType() != parsing::IfcTokenType::REF) continue;
+                    _loader.StepBack();
+                    if (_loader.GetLineType(_loader.GetRefArgument()) != schema::IFCPIPEFITTINGTYPE) continue;
+                    _loader.MoveToArgumentOffset(rel, 4);
+                    for (auto &object : _loader.GetSetArgument()) _pipeFittings.insert(_loader.GetRefArgument(object));
+                }
+            }
+            fitting = _pipeFittings.count(expressID) > 0;
+        }
+        if (fitting)
+        {
+            _loader.MoveToArgumentOffset(expressID, 2);
+            if (_loader.GetTokenType() == parsing::IfcTokenType::STRING)
+            {
+                _loader.StepBack();
+                std::string name(_loader.GetStringArgument());
+                std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (name.find("coupling") != std::string::npos || name.find("cplg") != std::string::npos) fitting = false;
+            }
+        }
+        MakeSolid() = fitting;
         IfcComposedMesh composedMesh = GetMesh(expressID);
         RoundRunSides() = 0;
+        MakeSolid() = false;
 
         glm::dmat4 mat = glm::dmat4(1);
         if (applyLinearScalingFactor)
