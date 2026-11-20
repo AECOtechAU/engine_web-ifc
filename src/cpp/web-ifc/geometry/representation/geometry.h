@@ -119,6 +119,7 @@ namespace webifc::geometry {
 			std::vector<IfcCurve> holes;
 			bool isConvex;
 			bool isComposite = false;
+			bool tube = false; // a ring: a round outline round a round void (which may have been filled)
 			std::vector<IfcProfile> profiles;
 			std::vector<double> tags;
 		};

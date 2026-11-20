@@ -15,7 +15,9 @@
 #include <string>
 #include <unordered_map>
 #include <glm/glm.hpp>
+#include <array>
 #include "../representation/geometry.h"
+#include "../representation/IfcGeometry.h"
 
 namespace webifc::geometry
 {
@@ -92,10 +94,41 @@ namespace webifc::geometry
 		return false;
 	}
 
+	// A round outline round a round opening on the same centre, the opening at least 30% as wide: the end of
+	// a tube. Round is eight or more points all as far from their middle (a nut's hexagon is not).
+	inline bool IsRing(const std::vector<glm::dvec2> &outline, const std::vector<glm::dvec2> &opening)
+	{
+		auto round = [](const std::vector<glm::dvec2> &poly, glm::dvec2 &centre, double &radius)
+		{
+			size_t n = poly.size();
+			if (n > 1 && poly.front() == poly.back()) n--;
+			if (n < 8) return false;
+			centre = glm::dvec2(0);
+			for (size_t i = 0; i < n; i++) centre += poly[i];
+			centre /= static_cast<double>(n);
+			radius = 0;
+			for (size_t i = 0; i < n; i++) radius += glm::distance(poly[i], centre);
+			radius /= static_cast<double>(n);
+			for (size_t i = 0; i < n; i++)
+				if (std::abs(glm::distance(poly[i], centre) - radius) > 0.03 * radius) return false;
+			return radius > 0;
+		};
+		glm::dvec2 c1, c2;
+		double r1 = 0, r2 = 0;
+		return round(outline, c1, r1) && round(opening, c2, r2) && r2 < r1 && r2 >= 0.3 * r1 && glm::distance(c1, c2) < 0.05 * r1;
+	}
+
 	// A profile's small voids are filled: the solid swept from it has no small holes through it
 	inline void DropSmallHoles(IfcProfile &profile, double metres)
 	{
 		if (!FillSmallOpeningsOn() || profile.holes.empty()) return;
+		if (profile.holes.size() == 1)
+		{
+			std::vector<glm::dvec2> outline, opening;
+			for (const auto &p : profile.curve.points) outline.emplace_back(p.x, p.y);
+			for (const auto &p : profile.holes[0].points) opening.emplace_back(p.x, p.y);
+			profile.tube = IsRing(outline, opening);
+		}
 		profile.holes.erase(std::remove_if(profile.holes.begin(), profile.holes.end(), [&](const IfcCurve &hole)
 		{
 			std::vector<glm::dvec2> poly;
@@ -169,6 +202,96 @@ namespace webifc::geometry
 		return e[1] < hole && e[2] <= slot;
 	}
 
+	// Small solids of a bigger element are left out, by the .frag exporter's rules and sizes:
+	// - under 25 mm every way, in an element of 100 mm or more;
+	// - bolts, screws, knobs: under 25 mm across their two narrow directions and under 80 mm long, in an
+	//   element of 320 mm or more - but not a tube (a valve's drain and connecting pipes);
+	// - thin small parts (a fan guard's rings, a label plate): at most 3 mm thick and 300 mm across, in an
+	//   element of 1.2 m or more.
+	constexpr double SMALL_SOLID_M = 0.025, SMALL_PART_LENGTH_M = 0.080, THIN_PART_M = 0.003, THIN_PART_MAX_M = 0.300;
+
+	inline bool &DropSmallSolidsOn()
+	{
+		static bool on = true;
+		return on;
+	}
+
+	// The mesh's extents (sorted, in metres once through `toMetres`) in the tightest of the frames its own
+	// faces suggest: the directions most of its surface faces, plus the world axes.
+	inline std::array<double, 3> OrientedExtents(const IfcGeometry &g, const glm::dmat4 &toMetres)
+	{
+		std::vector<glm::dvec3> points;
+		const uint32_t step = std::max<uint32_t>(1, g.numPoints / 1500);
+		for (uint32_t i = 0; i < g.numPoints; i += step) points.push_back(glm::dvec3(toMetres * glm::dvec4(g.GetPoint(i), 1)));
+		struct Way { glm::dvec3 dir; double area; };
+		std::vector<Way> ways;
+		const glm::dmat3 turn(toMetres);
+		const uint32_t faceStep = std::max<uint32_t>(1, g.numFaces / 3000);
+		for (uint32_t i = 0; i < g.numFaces; i += faceStep)
+		{
+			const auto f = g.GetFace(i);
+			const glm::dvec3 n = turn * glm::cross(g.GetPoint(f.i1) - g.GetPoint(f.i0), g.GetPoint(f.i2) - g.GetPoint(f.i0));
+			const double len = glm::length(n);
+			if (len < 1e-18) continue;
+			const glm::dvec3 unit = n / len;
+			bool known = false;
+			for (auto &w : ways)
+				if (std::abs(glm::dot(w.dir, unit)) > 0.999) { w.area += len; known = true; break; }
+			if (!known && ways.size() < 64) ways.push_back({unit, len});
+		}
+		std::sort(ways.begin(), ways.end(), [](const Way &a, const Way &b) { return a.area > b.area; });
+		std::vector<glm::dvec3> dirs = {glm::dvec3(1, 0, 0), glm::dvec3(0, 1, 0), glm::dvec3(0, 0, 1)};
+		for (const auto &w : ways)
+		{
+			if (dirs.size() >= 12) break;
+			bool known = false;
+			for (const auto &dir : dirs)
+				if (std::abs(glm::dot(dir, w.dir)) > 0.999) { known = true; break; }
+			if (!known) dirs.push_back(w.dir);
+		}
+		auto extent = [&](const glm::dvec3 &dir)
+		{
+			double lo = std::numeric_limits<double>::max(), hi = -lo;
+			for (const auto &p : points) { const double v = glm::dot(p, dir); lo = std::min(lo, v); hi = std::max(hi, v); }
+			return hi - lo;
+		};
+		double best = std::numeric_limits<double>::max();
+		std::array<double, 3> result = {best, best, best};
+		if (points.empty()) return result;
+		for (const auto &a : dirs)
+		{
+			// one frame per direction: it and the direction most square to it
+			glm::dvec3 b(0);
+			double square = 1;
+			for (const auto &dir : dirs) { const double c = std::abs(glm::dot(dir, a)); if (c < square) { square = c; b = dir; } }
+			glm::dvec3 b2 = b - a * glm::dot(b, a);
+			if (glm::length(b2) < 0.1) continue;
+			b2 = glm::normalize(b2);
+			std::array<double, 3> e = {extent(a), extent(b2), extent(glm::cross(a, b2))};
+			const double volume = e[0] * e[1] * e[2];
+			if (volume < best) { best = volume; std::sort(e.begin(), e.end()); result = e; }
+		}
+		return result;
+	}
+
+	// Whether this piece (its world box `box`, in metres) is left out of an element `elementSize` metres big
+	inline bool IsSmallSolid(const IfcGeometry &g, const glm::dmat4 &toMetres, const glm::dvec3 &box, double elementSize)
+	{
+		if (g.halfSpace || g.numFaces == 0) return false;
+		std::array<double, 3> world = {box.x, box.y, box.z};
+		std::sort(world.begin(), world.end());
+		if (elementSize >= 4 * SMALL_SOLID_M && world[2] < SMALL_SOLID_M) return true;
+		const bool partsApply = elementSize >= 4 * SMALL_PART_LENGTH_M, thinApplies = elementSize >= 4 * THIN_PART_MAX_M;
+		// even turned at an angle, a part's world box stays about this small
+		const bool partCandidate = partsApply && world[0] < 1.75 * SMALL_SOLID_M && world[2] < 1.75 * SMALL_PART_LENGTH_M;
+		const bool thinCandidate = thinApplies && world[2] < 1.75 * THIN_PART_MAX_M;
+		if (!partCandidate && !thinCandidate) return false;
+		const auto own = OrientedExtents(g, toMetres);
+		if (partCandidate && own[1] < SMALL_SOLID_M && own[2] < SMALL_PART_LENGTH_M && !g.tube) return true;
+		if (thinCandidate && own[0] <= THIN_PART_M && own[2] <= THIN_PART_MAX_M) return true;
+		return false;
+	}
+
 	// One face of a shell, as the small-opening rule sees it
 	struct ShellFace
 	{
@@ -204,7 +327,7 @@ namespace webifc::geometry
 
 	// Fills the small openings of a shell's flat faces (their inner bounds are removed) and marks the faces that
 	// sat in or behind them as dropped. Returns how many openings were filled.
-	inline int FillSmallOpenings(std::vector<ShellFace> &faces, double metres)
+	inline int FillSmallOpenings(std::vector<ShellFace> &faces, double metres, bool *tube = nullptr)
 	{
 		if (!FillSmallOpeningsOn()) return 0;
 		std::vector<FilledLoop> loops;
@@ -266,6 +389,7 @@ namespace webifc::geometry
 					loop.minU = std::min(loop.minU, q.x); loop.maxU = std::max(loop.maxU, q.x);
 					loop.minV = std::min(loop.minV, q.y); loop.maxV = std::max(loop.maxV, q.y);
 				}
+				if (tube && face.bounds.size() == 2 && IsRing(outlinePoly, poly)) *tube = true;
 				loop.poly = std::move(poly);
 				loop.points = face.bounds[i].curve.points;
 				loops.push_back(std::move(loop));

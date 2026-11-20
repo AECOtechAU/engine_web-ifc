@@ -1018,7 +1018,7 @@ namespace webifc::geometry
                         ReadIndexedPolygonalFace(_loader.GetRefArgument(faces[i]), shell[i].bounds, points);
                         shell[i].planar = true;
                     }
-                    FillSmallOpenings(shell, _cache.GetLinearScalingFactor());
+                    FillSmallOpenings(shell, _cache.GetLinearScalingFactor(), &geom.tube);
                     for (auto &face : shell)
                         if (!face.dropped) TriangulateBounds(geom, face.bounds, expressID);
                 }
@@ -1393,6 +1393,7 @@ namespace webifc::geometry
                 else if (!profile.isComposite)
                 {
                     geom = Extrude(profile, dir, depth);
+                    geom.tube = profile.tube;
                     if (flipWinding)
                     {
                         for (uint32_t i = 0; i < geom.numFaces; i++)
@@ -2133,6 +2134,48 @@ namespace webifc::geometry
         bool hasColor = false;
         AddComposedMeshToFlatMesh(flatMesh, composedMesh, _transformation * NormalizeIFC * mat, color, hasColor);
 
+        // Small solids of a bigger element are left out (bolts, screws, knobs, label plates)
+        if (DropSmallSolidsOn() && flatMesh.geometries.size() > 1)
+        {
+            const double metres = applyLinearScalingFactor ? 1.0 : _cache.GetLinearScalingFactor();
+            const glm::dmat4 scale = glm::scale(glm::dvec3(metres));
+            std::vector<glm::dvec3> boxes(flatMesh.geometries.size(), glm::dvec3(0));
+            glm::dvec3 lo(std::numeric_limits<double>::max()), hi(-std::numeric_limits<double>::max());
+            for (size_t i = 0; i < flatMesh.geometries.size(); i++)
+            {
+                const auto &piece = flatMesh.geometries[i];
+                const auto &geom = _expressIDToGeometry[piece.geometryExpressID];
+                if (geom.numPoints == 0) continue;
+                const glm::dmat4 toMetres = scale * piece.transformation;
+                glm::dvec3 pieceLo(std::numeric_limits<double>::max()), pieceHi(-std::numeric_limits<double>::max());
+                for (uint32_t p = 0; p < geom.numPoints; p++)
+                {
+                    const glm::dvec3 at(toMetres * glm::dvec4(geom.GetPoint(p), 1));
+                    pieceLo = glm::min(pieceLo, at);
+                    pieceHi = glm::max(pieceHi, at);
+                }
+                boxes[i] = pieceHi - pieceLo;
+                lo = glm::min(lo, pieceLo);
+                hi = glm::max(hi, pieceHi);
+            }
+            const double elementSize = std::max(hi.x - lo.x, std::max(hi.y - lo.y, hi.z - lo.z));
+            if (elementSize >= 4 * SMALL_SOLID_M)
+            {
+                std::vector<IfcPlacedGeometry> kept;
+                kept.reserve(flatMesh.geometries.size());
+                for (size_t i = 0; i < flatMesh.geometries.size(); i++)
+                {
+                    const auto &piece = flatMesh.geometries[i];
+                    const auto &geom = _expressIDToGeometry[piece.geometryExpressID];
+                    if (!IsSmallSolid(geom, scale * piece.transformation, boxes[i], elementSize)) kept.push_back(piece);
+                }
+                // never all of it: an element made only of small parts stays as it is
+                bool any = false;
+                for (const auto &piece : kept) any = any || _expressIDToGeometry[piece.geometryExpressID].numFaces > 0;
+                if (any) flatMesh.geometries = std::move(kept);
+            }
+        }
+
         return flatMesh;
     }
 
@@ -2533,7 +2576,7 @@ namespace webifc::geometry
                         shell[i].axisOrigin = glm::dvec3(surface.transformation[3]);
                     }
                 }
-                FillSmallOpenings(shell, _cache.GetLinearScalingFactor());
+                FillSmallOpenings(shell, _cache.GetLinearScalingFactor(), &geometry.tube);
                 for (size_t i = 0; i < faces.size(); i++)
                 {
                     if (shell[i].dropped) continue;

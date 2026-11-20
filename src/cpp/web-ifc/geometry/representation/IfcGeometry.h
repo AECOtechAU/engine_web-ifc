@@ -48,6 +48,7 @@ namespace webifc::geometry {
 	struct IfcGeometry : Geometry
 	{
 		bool halfSpace = false;
+		bool tube = false; // a hollow round thing (pipework), though its bore may have been filled
 		std::vector<IfcGeometry>  part;
 		Vec halfSpaceX = Vec(1, 0, 0);
 		Vec halfSpaceY = Vec(0, 1, 0);
