@@ -1980,7 +1980,9 @@ namespace webifc::geometry
 
             _loader.MoveToArgumentOffset(expressID, 0);
             uint32_t profileID = _loader.GetRefArgument();
+            _geometryLoader.SetSplineDensity(4);
             IfcProfile profile = _geometryLoader.GetProfile3D(profileID);
+            _geometryLoader.SetSplineDensity(1);
 
             surface.transformation = glm::dmat4(1);
             _loader.MoveToArgumentOffset(expressID, 1);
@@ -2016,7 +2018,9 @@ namespace webifc::geometry
             if (_loader.GetLineType(profileID) == schema::IFCARBITRARYOPENPROFILEDEF)
             {
                 _loader.MoveToArgumentOffset(profileID, 2);
+                _geometryLoader.SetSplineDensity(4);
                 sweptCurve = _geometryLoader.GetCurve(_loader.GetRefArgument(), 3);
+                _geometryLoader.SetSplineDensity(1);
             }
 
             _loader.MoveToArgumentOffset(expressID, 2);

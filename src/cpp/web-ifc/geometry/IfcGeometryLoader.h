@@ -69,6 +69,11 @@ namespace webifc::geometry
 
   private:
     mutable std::unordered_set<uint32_t> _activePlacements;
+    // How many times more points a 3D spline curve is given than its usual one per control point
+    mutable double _splineDensity = 1;
+  public:
+    void SetSplineDensity(double density) const { _splineDensity = density; }
+  private:
     IfcCurve GetAlignmentCurve(uint32_t expressID, uint32_t parentExpressID = -1) const;
     IfcProfile GetProfileByLine(uint32_t expressID) const;
     glm::dvec3 GetVertexPoint(uint32_t expressID) const;

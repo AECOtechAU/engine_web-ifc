@@ -3135,7 +3135,7 @@ namespace webifc::geometry
           ctrolPts.push_back(GetCartesianPoint3D(pointId));
         }
 
-        double numCurvePoints = ctrolPts.size();
+        double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
           ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
@@ -3229,7 +3229,7 @@ namespace webifc::geometry
           uint32_t pointId = _loader.GetRefArgument(token);
           ctrolPts.push_back(GetCartesianPoint3D(pointId));
         }
-        double numCurvePoints = ctrolPts.size();
+        double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
           ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
@@ -3320,7 +3320,7 @@ namespace webifc::geometry
           ctrolPts.push_back(GetCartesianPoint3D(pointId));
         }
 
-        double numCurvePoints = ctrolPts.size();
+        double numCurvePoints = ctrolPts.size() * _splineDensity;
         const bool betweenVertices = params.edge && params.hasTrim && params.trimStart.trimType == TRIM_BY_POSITION && params.trimEnd.trimType == TRIM_BY_POSITION;
         std::vector<glm::dvec3> tempPoints = betweenVertices
           ? GetTrimmedRationalBSplineCurveWithKnots(degree, ctrolPts, knots, weights, params.trimStart.pos3D, params.trimEnd.pos3D)
