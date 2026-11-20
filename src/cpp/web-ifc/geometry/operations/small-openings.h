@@ -223,9 +223,11 @@ namespace webifc::geometry
 	//   element of 1.2 m or more.
 	constexpr double SMALL_SOLID_M = 0.025, SMALL_PART_LENGTH_M = 0.080, THIN_PART_M = 0.003, THIN_PART_MAX_M = 0.300;
 
+	// Off: the importer keeps what was exported (Joe, 2026-11-20: only small holes are filled). The rule stays
+	// here, as the .frag exporter has it, for whoever turns it on.
 	inline bool &DropSmallSolidsOn()
 	{
-		static bool on = true;
+		static bool on = false;
 		return on;
 	}
 
@@ -339,9 +341,17 @@ namespace webifc::geometry
 		return n;
 	}
 
-	// Whether what joins an opening's edge stands out of the face it is in (a boss, or the body of a fitting
-	// beyond a socket's shoulder) and so is no opening into the solid. `n` points out of the solid.
-	inline bool StandsProud(const std::vector<ShellFace> &faces, size_t owner, const std::vector<glm::dvec3> &loop, const glm::dvec3 &o, const glm::dvec3 &n, double metres)
+	// Which faces of a shell use each point (built the first time it is asked for)
+	struct PointFaces
+	{
+		std::unordered_map<std::string, std::vector<uint32_t>> at;
+		bool built = false;
+	};
+
+	// Whether what joins an opening's edge stands out of the face it is in: a letter, a button, a boss, the body
+	// of a fitting beyond a socket's shoulder. Then it is the footprint of something raised, not a hole, and is
+	// left alone. `n` points out of the solid.
+	inline bool StandsProud(const std::vector<ShellFace> &faces, size_t owner, const std::vector<glm::dvec3> &loop, const glm::dvec3 &o, const glm::dvec3 &n, double metres, PointFaces &index)
 	{
 		const double grid = metres * 1e6, tol = 0.0001 / metres;
 		auto keyOf = [&](const glm::dvec3 &a)
@@ -349,20 +359,31 @@ namespace webifc::geometry
 			const long long q[3] = {std::llround(a.x * grid), std::llround(a.y * grid), std::llround(a.z * grid)};
 			return std::string(reinterpret_cast<const char *>(q), sizeof(q));
 		};
-		std::unordered_map<std::string, bool> on;
-		for (const auto &p : loop) on[keyOf(p)] = true;
-		for (size_t f = 0; f < faces.size(); f++)
+		if (!index.built)
 		{
-			if (f == owner) continue;
-			int shared = 0;
-			double hi = -std::numeric_limits<double>::max();
+			index.built = true;
+			for (size_t f = 0; f < faces.size(); f++)
+				for (const auto &b : faces[f].bounds)
+					for (const auto &p : b.curve.points)
+					{
+						auto &users = index.at[keyOf(p)];
+						if (users.empty() || users.back() != f) users.push_back(static_cast<uint32_t>(f));
+					}
+		}
+		std::unordered_map<uint32_t, int> shared;
+		for (const auto &p : loop)
+		{
+			auto it = index.at.find(keyOf(p));
+			if (it == index.at.end()) continue;
+			for (const auto f : it->second)
+				if (f != owner) shared[f]++;
+		}
+		for (const auto &[f, count] : shared)
+		{
+			if (count < 2) continue;
 			for (const auto &b : faces[f].bounds)
 				for (const auto &p : b.curve.points)
-				{
-					if (on.count(keyOf(p))) shared++;
-					hi = std::max(hi, glm::dot(p - o, n));
-				}
-			if (shared >= 2 && hi > tol) return true;
+					if (glm::dot(p - o, n) > tol) return true;
 		}
 		return false;
 	}
@@ -373,6 +394,7 @@ namespace webifc::geometry
 	{
 		if (!FillSmallOpeningsOn()) return 0;
 		std::vector<FilledLoop> loops;
+		PointFaces pointFaces;
 		for (size_t f = 0; f < faces.size(); f++)
 		{
 			auto &face = faces[f];
@@ -417,8 +439,12 @@ namespace webifc::geometry
 				auto poly = flat(face.bounds[i].curve.points);
 				// an opening sits inside the outline and is smaller than it
 				// (in a fitting made solid an opening of any size counts, if what joins it goes into the solid: its bore)
-				const bool bore = MakeSolid() && poly.size() >= 3 && !StandsProud(faces, f, face.bounds[i].curve.points, o, n, metres);
-				if (poly.size() < 3 || std::abs(LoopArea(poly)) >= outlineArea || !(bore || IsSmallOpening(poly, metres)))
+				// A hole is filled; the footprint of something raised (a letter, a button, a fitting's body beyond
+				// its socket) is not one: what was modelled standing out of a face stays as it was.
+				const bool candidate = poly.size() >= 3 && std::abs(LoopArea(poly)) < outlineArea && (MakeSolid() || IsSmallOpening(poly, metres));
+				const bool hole = candidate && !StandsProud(faces, f, face.bounds[i].curve.points, o, n, metres, pointFaces);
+				const bool bore = hole && MakeSolid();
+				if (!hole)
 				{
 					kept.push_back(face.bounds[i]);
 					kept.back().type = IfcBoundType::BOUND;
@@ -447,8 +473,7 @@ namespace webifc::geometry
 		}
 		if (loops.empty()) return 0;
 
-		// Everything inside a filled opening goes with it: a hole's or a slot's walls and floor behind it, a
-		// button's or a letter's sides and top standing proud of it.
+		// What is inside a filled opening goes with it: a hole's or a slot's walls and floor behind it.
 		const double tol = 0.0001 / metres;
 		for (size_t f = 0; f < faces.size(); f++)
 		{
@@ -472,12 +497,7 @@ namespace webifc::geometry
 				// facet's sagitta
 				const double edge = tol + 0.15 * std::min(l.maxU - l.minU, l.maxV - l.minV);
 				if (cu < l.minU - edge || cu > l.maxU + edge || cv < l.minV - edge || cv > l.maxV + edge) continue;
-				// Proud of the face only for small things (a button, a letter), and never further proud than
-				// the opening is wide; behind it (a hole's walls) at any depth.
-				const double raised = RAISED_MAX_M / metres;
-				const double proud = extent <= TEXT_MAX_HEIGHT_M / metres
-					? (extent < 0.008 / metres ? raised : std::min(raised, std::max(extent, 0.005 / metres)))
-					: tol;
+				const double proud = tol; // only what is in or behind the opening goes; nothing standing out of the face
 				bool all = true;
 				double lo = std::numeric_limits<double>::max(), hi = -lo;
 				for (const auto &b : face.bounds)
